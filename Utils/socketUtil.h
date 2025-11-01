@@ -1,0 +1,16 @@
+#ifndef SOCKETUTIL_H
+#define SOCKETUTIL_H
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <string.h>
+
+typedef struct sockaddr_in SocketAddress;
+
+int createTCPIPv4Socket();
+SocketAddress *getSocketAddress(char *ipAddr, int port);
+
+#endif
