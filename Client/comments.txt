@@ -6,6 +6,14 @@ socket() takes 3 params
     returns int socket file descriptor
     if failed, returns -1
 
+htos() takes 1 param
+    1. ip port number 
+    returns 2 byte short int representing that number in big endian (expected by tcp)
+
+inet_pton() takes 3 params
+    1. ip version (AF_INET = ipv)
+    2. ip adress in string form (ex : "121.21.32.3")
+    3. a pointer to 4 byte int where converted ip will be saved. 
 
 connect() takes 3 params
     1. socket file descriptor
@@ -13,11 +21,18 @@ connect() takes 3 params
     3. sizeof that address struct
     returns
 
-htos()
-    1. ip port number 
-    returns 2 byte short int representing that number in big endian (expected by tcp)
+send() takes 4 params
+    1. Socket file descriptor
+    2. message string(char*)
+    3. length of message
+    4. flags
 
-
+recv() takes 4 params
+    1. socket file descriptor
+    2. output buffer
+    3. length of output buffer
+    4. flags
+ 
 sockaddr_in contains 
     1. int sin_port (port number of server that is listening on the other side)
     2. sin_family (AF_INET = ipv4)
