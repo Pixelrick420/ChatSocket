@@ -12,5 +12,6 @@ typedef struct sockaddr_in SocketAddress;
 
 int createTCPIPv4Socket();
 SocketAddress *getSocketAddress(char *ipAddr, int port);
+int connectToSocket(int socketFD, SocketAddress *address, int size);
 
 #endif

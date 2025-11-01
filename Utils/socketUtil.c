@@ -31,3 +31,13 @@ SocketAddress *getSocketAddress(char *ipAddr, int port)
 
     return address;
 }
+
+int connectToSocket(int socketFD, SocketAddress *address, int size)
+{
+    if (connect(socketFD, (struct sockaddr *)address, size) != 0)
+    {
+        printf("Connection failed\n");
+        exit(EXIT_FAILURE);
+    }
+    return 0;
+}

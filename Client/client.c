@@ -7,19 +7,15 @@ int main()
 {
     int socketFD = createTCPIPv4Socket();
     SocketAddress *address = getSocketAddress(IP, PORT);
-
-    int result = connect(socketFD, (struct sockaddr *)address, sizeof(*address));
-    if (result == 0)
-    {
-        printf("Connection Succesfull\n");
-    }
+    int result = connectToSocket(socketFD, address, sizeof(*address));
 
     char *message = "GET / HTTP/1.1\r\nHost: google.com\r\nConnection: close\r\n\r\n";
     char buffer[4096];
+
     send(socketFD, message, strlen(message), 0);
     recv(socketFD, buffer, 4096, 0);
-    printf("Response: \n%s\n", buffer);
 
+    printf("Response: \n%s\n", buffer);
     free(address);
     return 0;
 }
