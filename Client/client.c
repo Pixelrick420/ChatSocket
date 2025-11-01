@@ -1,15 +1,15 @@
 #include "../Utils/socketUtil.h"
 
-char *IP = "74.125.200.101";
-int PORT = 80;
+char *IP = "127.0.0.1";
+int PORT = 2077;
 
 int main()
 {
     int socketFD = createTCPIPv4Socket();
-    SocketAddress *address = getSocketAddress(IP, PORT);
+    SocketAddress *address = getSocketAddress(IP, PORT, true);
     int result = connectToSocket(socketFD, address, sizeof(*address));
 
-    char *message = "GET / HTTP/1.1\r\nHost: google.com\r\nConnection: close\r\n\r\n";
+    char *message = "Hello from the client\n";
     char buffer[4096];
 
     send(socketFD, message, strlen(message), 0);
