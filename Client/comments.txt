@@ -1,0 +1,24 @@
+socket() takes 3 params
+    1. IP version(AF_INET = ipv4)
+    2. Type (tcp or udp) (SOCK_STREAM = tcp)
+    3. Protocol Underneath (0 = IP)
+
+    returns int socket file descriptor
+    if failed, returns -1
+
+
+connect() takes 3 params
+    1. socket file descriptor
+    2. pointer to sockaddr structure (sockaddr_in = ipv4)
+    3. sizeof that address struct
+    returns
+
+htos()
+    1. ip port number 
+    returns 2 byte short int representing that number in big endian (expected by tcp)
+
+
+sockaddr_in contains 
+    1. int sin_port (port number of server that is listening on the other side)
+    2. sin_family (AF_INET = ipv4)
+    3. sin_addr.s_addr (ip address 4 bytes)
