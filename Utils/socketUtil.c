@@ -1,6 +1,7 @@
 #include "socketUtil.h"
 
 pthread_mutex_t printLock = PTHREAD_MUTEX_INITIALIZER;
+
 void print(char *message)
 {
     pthread_mutex_lock(&printLock);
@@ -78,6 +79,8 @@ Client *createClient(int socketFD, SocketAddress *clientAddr)
     client->address = (clientAddr);
     client->socketFD = accept(socketFD, (struct sockaddr *)clientAddr, &clientAddrSize);
     client->success = (client->socketFD > 0);
+    strcpy(client->name, "sock");
+    client->currentRoom = -1;
 
     if (!client->success)
     {
@@ -104,4 +107,134 @@ void recieveMessages(int socketFD)
     }
 
     free(buffer);
+}
+
+ServerContext *createContext(int socketFD, int size)
+{
+    ServerContext *context = (ServerContext *)malloc(sizeof(ServerContext));
+    context->size = size;
+    context->clients = (Client **)malloc(sizeof(Client *) * context->size);
+    context->socketFD = socketFD;
+    context->clientCount = 0;
+    context->rooms = (Room **)malloc(sizeof(Room *) * 50);
+    context->roomCount = 0;
+    context->maxRooms = 50;
+    pthread_mutex_init(&context->mutex, NULL);
+    return context;
+}
+void cleanupServer(ServerContext *context)
+{
+    pthread_mutex_destroy(&context->mutex);
+    for (int i = 0; i < context->roomCount; i++)
+    {
+        free(context->rooms[i]->members);
+        free(context->rooms[i]);
+    }
+    free(context->rooms);
+    free(context->clients);
+    free(context);
+}
+
+int addClient(ServerContext *context, Client *client)
+{
+    pthread_mutex_lock(&context->mutex);
+    if (context->clientCount >= context->size)
+    {
+        pthread_mutex_unlock(&context->mutex);
+        return -1;
+    }
+    context->clients[context->clientCount++] = client;
+    pthread_mutex_unlock(&context->mutex);
+    return 0;
+}
+
+void removeClient(ServerContext *context, int socketFD)
+{
+    pthread_mutex_lock(&context->mutex);
+    for (size_t i = 0; i < context->clientCount; i++)
+    {
+        if (context->clients[i]->socketFD == socketFD)
+        {
+            context->clients[i] = context->clients[context->clientCount - 1];
+            context->clientCount--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
+
+void broadcastMessage(ServerContext *context, int senderFD, const char *msg, size_t len)
+{
+    pthread_mutex_lock(&context->mutex);
+    for (size_t i = 0; i < context->clientCount; i++)
+    {
+        int fd = context->clients[i]->socketFD;
+        if (fd != senderFD)
+        {
+            send(fd, msg, len, 0);
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
+
+Room *createRoom(const char *name, const char *password)
+{
+    Room *room = (Room *)malloc(sizeof(Room));
+    strcpy(room->name, name);
+    room->hasPassword = (password != NULL && strlen(password) > 0);
+    if (room->hasPassword)
+    {
+        strcpy(room->password, password);
+    }
+    room->members = (int *)malloc(sizeof(int) * 32);
+    room->memberCount = 0;
+    room->maxMembers = 32;
+    room->lastActivity = time(NULL);
+    return room;
+}
+
+int findRoom(ServerContext *context, const char *name)
+{
+    for (int i = 0; i < context->roomCount; i++)
+    {
+        if (strcmp(context->rooms[i]->name, name) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void cleanupInactiveRooms(ServerContext *context)
+{
+    time_t now = time(NULL);
+    pthread_mutex_lock(&context->mutex);
+    for (int i = 0; i < context->roomCount; i++)
+    {
+        if (difftime(now, context->rooms[i]->lastActivity) > 3600)
+        {
+            free(context->rooms[i]->members);
+            free(context->rooms[i]);
+            context->rooms[i] = context->rooms[context->roomCount - 1];
+            context->roomCount--;
+            i--;
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
+
+void broadcastToRoom(ServerContext *context, int roomIdx, int senderFD, const char *msg, size_t len)
+{
+    pthread_mutex_lock(&context->mutex);
+    Room *room = context->rooms[roomIdx];
+    room->lastActivity = time(NULL);
+    for (int i = 0; i < room->memberCount; i++)
+    {
+        int fd = room->members[i];
+        if (fd != senderFD)
+        {
+            send(fd, msg, len, 0);
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
 }

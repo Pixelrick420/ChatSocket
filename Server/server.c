@@ -3,99 +3,269 @@
 char *LOCALHOST = "0.0.0.0";
 int BACKLOG = 10;
 int MAX_CLIENTS = 32;
-
-typedef struct
-{
-    int socketFD;
-    pthread_mutex_t mutex;
-    Client **clients;
-    size_t clientCount;
-} ServerContext;
-
 ServerContext *globalContext = NULL;
 
-ServerContext *createContext(int socketFD)
+void handleHelp(Client *client)
 {
-    ServerContext *context = (ServerContext *)malloc(sizeof(ServerContext));
-    context->clients = (Client **)malloc(sizeof(Client *) * MAX_CLIENTS);
-    context->socketFD = socketFD;
-    context->clientCount = 0;
-    pthread_mutex_init(&context->mutex, NULL);
-    return context;
+    char response[MSG_SIZE];
+    snprintf(response, MSG_SIZE,
+             "Commands:\n"
+             "\\help - Show this help\n"
+             "\\create <room> -p <password> - Create room\n"
+             "\\enter <room> - Enter room\n"
+             "\\leave - Leave current room\n"
+             "\\exit - Exit\n"
+             "\\name <name> - Set your name\n");
+    send(client->socketFD, response, strlen(response), 0);
 }
 
-void cleanupServer(ServerContext *context)
+void handleName(Client *client, char *buffer)
 {
-    pthread_mutex_destroy(&context->mutex);
-    free(context->clients);
-    free(context);
+    char response[MSG_SIZE];
+    sscanf(buffer + 6, "%63s", client->name);
+    snprintf(response, MSG_SIZE, "Name set to: %s\n", client->name);
+    send(client->socketFD, response, strlen(response), 0);
 }
 
-int addClient(ServerContext *context, Client *client)
+void handleCreate(Client *client, char *buffer)
 {
-    pthread_mutex_lock(&context->mutex);
-    if (context->clientCount >= MAX_CLIENTS)
+    char roomName[64] = {0};
+    char password[64] = {0};
+    char response[MSG_SIZE];
+    char *pFlag = strstr(buffer + 8, " -p ");
+
+    if (pFlag)
     {
-        pthread_mutex_unlock(&context->mutex);
-        return -1;
+        sscanf(buffer + 8, "%63s", roomName);
+        sscanf(pFlag + 4, "%63s", password);
     }
-    context->clients[context->clientCount++] = client;
-    pthread_mutex_unlock(&context->mutex);
-    return 0;
+    else
+    {
+        sscanf(buffer + 8, "%63s", roomName);
+    }
+
+    pthread_mutex_lock(&globalContext->mutex);
+    if (findRoom(globalContext, roomName) != -1)
+    {
+        snprintf(response, MSG_SIZE, "Room '%s' already exists\n", roomName);
+    }
+    else
+    {
+        Room *room = createRoom(roomName, pFlag ? password : NULL);
+        globalContext->rooms[globalContext->roomCount++] = room;
+        snprintf(response, MSG_SIZE, "Room '%s' created\n", roomName);
+    }
+    pthread_mutex_unlock(&globalContext->mutex);
+    send(client->socketFD, response, strlen(response), 0);
 }
 
-void removeClient(ServerContext *context, int socketFD)
+void handleEnter(Client *client, char *buffer)
 {
-    pthread_mutex_lock(&context->mutex);
-    for (size_t i = 0; i < context->clientCount; i++)
+    char roomName[64];
+    char response[MSG_SIZE];
+    sscanf(buffer + 7, "%63s", roomName);
+
+    pthread_mutex_lock(&globalContext->mutex);
+    int roomIdx = findRoom(globalContext, roomName);
+
+    if (roomIdx == -1)
     {
-        if (context->clients[i]->socketFD == socketFD)
+        snprintf(response, MSG_SIZE, "Room '%s' does not exist\n", roomName);
+        pthread_mutex_unlock(&globalContext->mutex);
+        send(client->socketFD, response, strlen(response), 0);
+        return;
+    }
+
+    Room *room = globalContext->rooms[roomIdx];
+
+    if (room->hasPassword)
+    {
+        char *prompt = "Password: ";
+        send(client->socketFD, prompt, strlen(prompt), 0);
+        pthread_mutex_unlock(&globalContext->mutex);
+
+        char inputPass[64];
+        size_t passLen = recv(client->socketFD, inputPass, 63, 0);
+        if (passLen > 0)
         {
-            context->clients[i] = context->clients[context->clientCount - 1];
-            context->clientCount--;
+            inputPass[passLen - 1] = 0;
+            pthread_mutex_lock(&globalContext->mutex);
+
+            if (strcmp(room->password, inputPass) == 0)
+            {
+                client->currentRoom = roomIdx;
+                room->members[room->memberCount++] = client->socketFD;
+                snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
+            }
+            else
+            {
+                snprintf(response, MSG_SIZE, "Incorrect password\n");
+            }
+            pthread_mutex_unlock(&globalContext->mutex);
+            send(client->socketFD, response, strlen(response), 0);
+        }
+    }
+    else
+    {
+        client->currentRoom = roomIdx;
+        room->members[room->memberCount++] = client->socketFD;
+        snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
+        pthread_mutex_unlock(&globalContext->mutex);
+        send(client->socketFD, response, strlen(response), 0);
+    }
+}
+
+void handleLeave(Client *client)
+{
+    if (client->currentRoom == -1)
+    {
+        char *msg = "Not in a room\n";
+        send(client->socketFD, msg, strlen(msg), 0);
+        return;
+    }
+
+    pthread_mutex_lock(&globalContext->mutex);
+    Room *room = globalContext->rooms[client->currentRoom];
+
+    for (int i = 0; i < room->memberCount; i++)
+    {
+        if (room->members[i] == client->socketFD)
+        {
+            room->members[i] = room->members[room->memberCount - 1];
+            room->memberCount--;
             break;
         }
     }
-    pthread_mutex_unlock(&context->mutex);
+
+    client->currentRoom = -1;
+    pthread_mutex_unlock(&globalContext->mutex);
+    char *msg = "Left Room\n";
+    send(client->socketFD, msg, strlen(msg), 0);
 }
 
-void broadcastMessage(ServerContext *context, int senderFD, const char *msg, size_t len)
+void handleMessage(Client *client, char *buffer)
 {
-    pthread_mutex_lock(&context->mutex);
-    for (size_t i = 0; i < context->clientCount; i++)
+    if (client->currentRoom == -1)
     {
-        int fd = context->clients[i]->socketFD;
-        if (fd != senderFD)
+        char *msg = "Not in a room. Use \\enter <room>\n";
+        send(client->socketFD, msg, strlen(msg), 0);
+        return;
+    }
+
+    char response[MSG_SIZE];
+    snprintf(response, MSG_SIZE, "%s: %s", client->name, buffer);
+    broadcastToRoom(globalContext, client->currentRoom, client->socketFD, response, strlen(response));
+}
+
+CommandType parseCommand(char *buffer)
+{
+    if (buffer[0] != '\\')
+        return CMD_MESSAGE;
+
+    if (strncmp(buffer, "\\help", 5) == 0)
+        return CMD_HELP;
+    if (strncmp(buffer, "\\name ", 6) == 0)
+        return CMD_NAME;
+    if (strncmp(buffer, "\\create ", 8) == 0)
+        return CMD_CREATE;
+    if (strncmp(buffer, "\\enter ", 7) == 0)
+        return CMD_ENTER;
+    if (strncmp(buffer, "\\leave", 6) == 0)
+        return CMD_LEAVE;
+    if (strncmp(buffer, "\\exit", 5) == 0)
+        return CMD_EXIT;
+
+    return CMD_UNKNOWN;
+}
+
+void cleanupClientRoom(Client *client)
+{
+    if (client->currentRoom == -1)
+        return;
+
+    pthread_mutex_lock(&globalContext->mutex);
+    Room *room = globalContext->rooms[client->currentRoom];
+
+    for (int i = 0; i < room->memberCount; i++)
+    {
+        if (room->members[i] == client->socketFD)
         {
-            send(fd, msg, len, 0);
+            room->members[i] = room->members[room->memberCount - 1];
+            room->memberCount--;
+            break;
         }
     }
-    pthread_mutex_unlock(&context->mutex);
+    pthread_mutex_unlock(&globalContext->mutex);
 }
 
 void *handleClient(void *arg)
 {
     Client *client = (Client *)arg;
-
     char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
-    while (true)
+    bool running = true;
+
+    while (running)
     {
         size_t received = recv(client->socketFD, buffer, MSG_SIZE, 0);
-        if (received > 0)
+        if (received <= 0)
+            break;
+
+        buffer[received] = 0;
+
+        CommandType cmd = parseCommand(buffer);
+
+        switch (cmd)
         {
-            buffer[received] = 0;
-            broadcastMessage(globalContext, client->socketFD, buffer, received);
-        }
-        else
-        {
+        case CMD_HELP:
+            handleHelp(client);
+            break;
+
+        case CMD_NAME:
+            handleName(client, buffer);
+            break;
+
+        case CMD_CREATE:
+            handleCreate(client, buffer);
+            break;
+
+        case CMD_ENTER:
+            handleEnter(client, buffer);
+            break;
+
+        case CMD_LEAVE:
+            handleLeave(client);
+            break;
+
+        case CMD_EXIT:
+            running = false;
+            break;
+
+        case CMD_MESSAGE:
+            handleMessage(client, buffer);
+            break;
+
+        case CMD_UNKNOWN:
+            char *msg = "Unknown command. Type \\help for help\n";
+            send(client->socketFD, msg, strlen(msg), 0);
             break;
         }
     }
 
+    cleanupClientRoom(client);
     free(buffer);
     removeClient(globalContext, client->socketFD);
     close(client->socketFD);
     free(client);
+    return NULL;
+}
+
+void *cleanupThread(void *arg)
+{
+    while (true)
+    {
+        sleep(600);
+        cleanupInactiveRooms(globalContext);
+    }
     return NULL;
 }
 
@@ -111,7 +281,11 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    globalContext = createContext(serverSocketFD);
+    globalContext = createContext(serverSocketFD, MAX_CLIENTS);
+
+    pthread_t cleanupTid;
+    pthread_create(&cleanupTid, NULL, cleanupThread, NULL);
+    pthread_detach(cleanupTid);
 
     while (true)
     {

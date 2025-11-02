@@ -5,6 +5,8 @@
         "stdio.h": "c",
         "inet.h": "c",
         "socketutil.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "in.h": "c",
+        "pthread.h": "c"
     }
 }
