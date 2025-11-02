@@ -2,15 +2,25 @@
 
 char *IP = "127.0.0.1";
 
+void *receiveThread(void *arg)
+{
+    int socketFD = *(int *)arg;
+    recieveMessages(socketFD);
+    return NULL;
+}
+
 int main()
 {
     int socketFD = createTCPIPv4Socket();
     SocketAddress *address = getSocketAddress(IP, PORT, true);
     int result = connectToSocket(socketFD, address, sizeof(*address));
 
+    pthread_t pid;
+    pthread_create(&pid, NULL, receiveThread, &socketFD);
+    pthread_detach(pid);
+
     char *message = NULL;
     size_t msgSize = 0;
-    char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
 
     printf("SocketChat CLI\n");
     while (true)
