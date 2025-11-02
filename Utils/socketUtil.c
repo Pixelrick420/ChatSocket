@@ -85,3 +85,23 @@ Client *createClient(int socketFD, SocketAddress *clientAddr)
     }
     return client;
 }
+
+void recieveMessages(int socketFD)
+{
+    char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
+    while (true)
+    {
+        size_t received = recv(socketFD, buffer, MSG_SIZE, 0);
+        if (received > 0)
+        {
+            buffer[received] = 0;
+            print(buffer);
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    free(buffer);
+}

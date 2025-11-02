@@ -10,17 +10,19 @@
 #include <string.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <time.h>
 
 #define MSG_SIZE 2048
 #define PORT 2077
 
 typedef struct sockaddr_in SocketAddress;
-typedef struct AcceptedSocket
+typedef struct
 {
     int socketFD;
     SocketAddress *address;
     int error;
     bool success;
+    time_t lastActivity;
 } Client;
 
 void print(char *message);
@@ -29,5 +31,6 @@ SocketAddress *getSocketAddress(char *ipAddr, int port, bool isClient);
 int connectToSocket(int socketFD, SocketAddress *address, int size);
 int bindServerToSocket(int socketFD, SocketAddress *address, int size);
 Client *createClient(int socketFD, SocketAddress *clientAddr);
+void recieveMessages(int socketFD);
 
 #endif

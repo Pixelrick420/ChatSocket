@@ -1,7 +1,77 @@
 #include "../Utils/socketUtil.h"
 
-char *LOCALHOST = "127.0.0.1";
+char *LOCALHOST = "0.0.0.0";
 int BACKLOG = 10;
+int MAX_CLIENTS = 32;
+
+typedef struct
+{
+    int socketFD;
+    pthread_mutex_t mutex;
+    Client **clients;
+    size_t clientCount;
+} ServerContext;
+
+ServerContext *globalContext = NULL;
+
+ServerContext *createContext(int socketFD)
+{
+    ServerContext *context = (ServerContext *)malloc(sizeof(ServerContext));
+    context->clients = (Client **)malloc(sizeof(Client *) * MAX_CLIENTS);
+    context->socketFD = socketFD;
+    context->clientCount = 0;
+    pthread_mutex_init(&context->mutex, NULL);
+    return context;
+}
+
+void cleanupServer(ServerContext *context)
+{
+    pthread_mutex_destroy(&context->mutex);
+    free(context->clients);
+    free(context);
+}
+
+int addClient(ServerContext *context, Client *client)
+{
+    pthread_mutex_lock(&context->mutex);
+    if (context->clientCount >= MAX_CLIENTS)
+    {
+        pthread_mutex_unlock(&context->mutex);
+        return -1;
+    }
+    context->clients[context->clientCount++] = client;
+    pthread_mutex_unlock(&context->mutex);
+    return 0;
+}
+
+void removeClient(ServerContext *context, int socketFD)
+{
+    pthread_mutex_lock(&context->mutex);
+    for (size_t i = 0; i < context->clientCount; i++)
+    {
+        if (context->clients[i]->socketFD == socketFD)
+        {
+            context->clients[i] = context->clients[context->clientCount - 1];
+            context->clientCount--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
+
+void broadcastMessage(ServerContext *context, int senderFD, const char *msg, size_t len)
+{
+    pthread_mutex_lock(&context->mutex);
+    for (size_t i = 0; i < context->clientCount; i++)
+    {
+        int fd = context->clients[i]->socketFD;
+        if (fd != senderFD)
+        {
+            send(fd, msg, len, 0);
+        }
+    }
+    pthread_mutex_unlock(&context->mutex);
+}
 
 void *handleClient(void *arg)
 {
@@ -14,7 +84,7 @@ void *handleClient(void *arg)
         if (received > 0)
         {
             buffer[received] = 0;
-            print(buffer);
+            broadcastMessage(globalContext, client->socketFD, buffer, received);
         }
         else
         {
@@ -23,6 +93,7 @@ void *handleClient(void *arg)
     }
 
     free(buffer);
+    removeClient(globalContext, client->socketFD);
     close(client->socketFD);
     free(client);
     return NULL;
@@ -40,11 +111,14 @@ int main()
         exit(EXIT_FAILURE);
     }
 
+    globalContext = createContext(serverSocketFD);
+
     while (true)
     {
         SocketAddress clientAddr;
         Client *client = createClient(serverSocketFD, &clientAddr);
 
+        addClient(globalContext, client);
         pthread_t id;
         pthread_create(&id, NULL, handleClient, client);
         pthread_detach(id);
