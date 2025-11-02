@@ -1,4 +1,5 @@
 #include "../Utils/socketUtil.h"
+#include "../Utils/sha256.h"
 
 char *LOCALHOST = "0.0.0.0";
 int BACKLOG = 10;
@@ -34,6 +35,12 @@ void handleCreate(Client *client, char *buffer)
     char response[MSG_SIZE];
     char *pFlag = strstr(buffer + 8, " -p ");
 
+    size_t buflen = strlen(buffer);
+    while (buflen > 0 && (buffer[buflen - 1] == '\n' || buffer[buflen - 1] == '\r'))
+    {
+        buffer[--buflen] = '\0';
+    }
+
     if (pFlag)
     {
         sscanf(buffer + 8, "%63s", roomName);
@@ -51,7 +58,25 @@ void handleCreate(Client *client, char *buffer)
     }
     else
     {
-        Room *room = createRoom(roomName, pFlag ? password : NULL);
+        Room *room;
+        if (pFlag)
+        {
+            char *stored = createHashedPass(roomName, password);
+            if (!stored)
+            {
+                snprintf(response, MSG_SIZE, "Failed to create room (hash error)\n");
+            }
+            else
+            {
+                room = createRoom(roomName, stored);
+                free(stored);
+            }
+        }
+        else
+        {
+            room = createRoom(roomName, NULL);
+        }
+
         globalContext->rooms[globalContext->roomCount++] = room;
         snprintf(response, MSG_SIZE, "Room '%s' created\n", roomName);
     }
@@ -88,10 +113,20 @@ void handleEnter(Client *client, char *buffer)
         size_t passLen = recv(client->socketFD, inputPass, 63, 0);
         if (passLen > 0)
         {
-            inputPass[passLen - 1] = 0;
+            inputPass[passLen] = '\0';
+            while (passLen > 0 && (inputPass[passLen - 1] == '\n' || inputPass[passLen - 1] == '\r'))
+            {
+                inputPass[--passLen] = '\0';
+            }
+
             pthread_mutex_lock(&globalContext->mutex);
 
-            if (strcmp(room->password, inputPass) == 0)
+            char dbg[512];
+            snprintf(dbg, 512, "DEBUG: room='%s' stored='%s' input='%s' len=%zu\n",
+                     roomName, room->password, inputPass, passLen);
+            send(client->socketFD, dbg, strlen(dbg), 0);
+
+            if (verifyHashedPass(room->password, roomName, inputPass))
             {
                 client->currentRoom = roomIdx;
                 room->members[room->memberCount++] = client->socketFD;
