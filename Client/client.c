@@ -2,7 +2,7 @@
 #include "../Utils/sha256.h"
 #include "../Utils/aes.h"
 
-char *IP = "216.24.57.251";
+char *IP = "127.0.0.1";
 
 RoomEncryption currentEncryption = {0};
 
