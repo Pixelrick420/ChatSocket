@@ -1,7 +1,6 @@
 #include "../Utils/socketUtil.h"
 
 char *IP = "127.0.0.1";
-int PORT = 2077;
 
 int main()
 {
@@ -9,13 +8,23 @@ int main()
     SocketAddress *address = getSocketAddress(IP, PORT, true);
     int result = connectToSocket(socketFD, address, sizeof(*address));
 
-    char *message = "Hello from the client\n";
-    char buffer[4096];
+    char *message = NULL;
+    size_t msgSize = 0;
+    char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
 
-    send(socketFD, message, strlen(message), 0);
-    recv(socketFD, buffer, 4096, 0);
+    printf("SocketChat CLI\n");
+    while (true)
+    {
+        size_t charCount = getline(&message, &msgSize, stdin);
+        if ((charCount > 0) && strcmp(message, "exit\n") == 0)
+        {
+            break;
+        }
+        size_t amountSent = send(socketFD, message, charCount, 0);
+    }
 
-    printf("Response: \n%s\n", buffer);
+    close(socketFD);
+    free(message);
     free(address);
     return 0;
 }

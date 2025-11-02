@@ -37,3 +37,17 @@ sockaddr_in contains
     1. int sin_port (port number of server that is listening on the other side)
     2. sin_family (AF_INET = ipv4)
     3. sin_addr.s_addr (ip address 4 bytes)
+
+bind() takes 3 params
+    1. server socketFD
+    2. address of the server socket 
+    3. size of the address
+
+listen() takes 2 params
+    1. client socketFD
+    2. backlog count (max no of clients at one time)
+    
+accept() takes 3 params
+    1. socketFD of client
+    2. client socket address
+    3. pointer to size of client socket address
