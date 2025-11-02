@@ -243,7 +243,12 @@ void *handleClient(void *arg)
             break;
 
         buffer[received] = 0;
-
+        if (strncmp(buffer, "GET ", 4) == 0)
+        {
+            char *http_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+            send(client->socketFD, http_response, strlen(http_response), 0);
+            goto cleanup;
+        }
         CommandType cmd = parseCommand(buffer);
 
         switch (cmd)
@@ -282,7 +287,7 @@ void *handleClient(void *arg)
             break;
         }
     }
-
+cleanup:
     cleanupClientRoom(client);
     free(buffer);
     removeClient(globalContext, client->socketFD);
