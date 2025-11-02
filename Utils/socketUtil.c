@@ -1,4 +1,5 @@
 #include "socketUtil.h"
+#include <errno.h>
 
 pthread_mutex_t printLock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -65,6 +66,7 @@ int bindServerToSocket(int socketFD, SocketAddress *address, int size)
     int result = bind(socketFD, (struct sockaddr *)address, size);
     if (result != 0)
     {
+        perror("Socket bind failed");
         print("Socket bind failed\n");
         exit(EXIT_FAILURE);
     }

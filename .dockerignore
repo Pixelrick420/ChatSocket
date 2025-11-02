@@ -1,0 +1,6 @@
+Client/
+*.o
+server
+.git
+.gitignore
+README.md

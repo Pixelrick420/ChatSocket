@@ -303,9 +303,13 @@ void *cleanupThread(void *arg)
 
 int main()
 {
+    char *port_env = getenv("PORT");
+    int server_port = port_env ? atoi(port_env) : PORT;
+
     int serverSocketFD = createTCPIPv4Socket();
-    SocketAddress *address = getSocketAddress(LOCALHOST, PORT, false);
+    SocketAddress *address = getSocketAddress(LOCALHOST, server_port, false);
     bindServerToSocket(serverSocketFD, address, sizeof(*address));
+    printf("Server starting on port %d...\n", server_port);
 
     if (listen(serverSocketFD, BACKLOG) != 0)
     {

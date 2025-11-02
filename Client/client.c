@@ -13,7 +13,7 @@ void clearScreen()
 
 void processIncomingMessage(char *buffer, size_t received)
 {
-    char formatted[MSG_SIZE + 20];
+    char formatted[MSG_SIZE * 2];
 
     char *colon = strchr(buffer, ':');
     char username[64] = {0};
@@ -232,7 +232,7 @@ int main()
                 char encoded[MSG_SIZE * 2];
                 encodeBase64(ciphertext, ciphertextLen, encoded);
 
-                char toSend[MSG_SIZE * 2];
+                char toSend[MSG_SIZE * 2 + 10];
                 snprintf(toSend, MSG_SIZE * 2, "ENC:%s\n", encoded);
                 send(socketFD, toSend, strlen(toSend), 0);
             }
