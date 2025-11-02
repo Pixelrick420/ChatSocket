@@ -9,6 +9,7 @@
         "in.h": "c",
         "pthread.h": "c",
         "executor": "c",
-        "mutex": "c"
+        "mutex": "c",
+        "sha256.h": "c"
     }
 }
