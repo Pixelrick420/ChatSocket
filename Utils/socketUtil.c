@@ -79,7 +79,8 @@ Client *createClient(int socketFD, SocketAddress *clientAddr)
     client->address = (clientAddr);
     client->socketFD = accept(socketFD, (struct sockaddr *)clientAddr, &clientAddrSize);
     client->success = (client->socketFD > 0);
-    strcpy(client->name, "sock");
+    snprintf(client->name, 10, "Sock%d", rand());
+
     client->currentRoom = -1;
 
     if (!client->success)

@@ -14,6 +14,11 @@
 
 #define MSG_SIZE 2048
 #define PORT 2077
+#define COLOR_RESET "\033[0m"
+#define COLOR_GREEN "\033[1;32m"
+#define COLOR_CYAN "\033[1;36m"
+#define COLOR_RED "\033[1;31m"
+#define COLOR_YELLOW "\033[1;33m"
 
 typedef enum
 {

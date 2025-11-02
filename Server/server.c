@@ -10,12 +10,12 @@ void handleHelp(Client *client)
     char response[MSG_SIZE];
     snprintf(response, MSG_SIZE,
              "Commands:\n"
-             "\\help - Show this help\n"
-             "\\create <room> -p <password> - Create room\n"
-             "\\enter <room> - Enter room\n"
-             "\\leave - Leave current room\n"
-             "\\exit - Exit\n"
-             "\\name <name> - Set your name\n");
+             "/help - Show this help\n"
+             "/create <room> -p <password> - Create room\n"
+             "/enter <room> - Enter room\n"
+             "/leave - Leave current room\n"
+             "/exit - Exit\n"
+             "/name <name> - Set your name\n");
     send(client->socketFD, response, strlen(response), 0);
 }
 
@@ -147,7 +147,7 @@ void handleMessage(Client *client, char *buffer)
 {
     if (client->currentRoom == -1)
     {
-        char *msg = "Not in a room. Use \\enter <room>\n";
+        char *msg = "Not in a room. Use /enter <room>\n";
         send(client->socketFD, msg, strlen(msg), 0);
         return;
     }
@@ -159,20 +159,20 @@ void handleMessage(Client *client, char *buffer)
 
 CommandType parseCommand(char *buffer)
 {
-    if (buffer[0] != '\\')
+    if (buffer[0] != '/')
         return CMD_MESSAGE;
 
-    if (strncmp(buffer, "\\help", 5) == 0)
+    if (strncmp(buffer, "/help", 5) == 0)
         return CMD_HELP;
-    if (strncmp(buffer, "\\name ", 6) == 0)
+    if (strncmp(buffer, "/name ", 6) == 0)
         return CMD_NAME;
-    if (strncmp(buffer, "\\create ", 8) == 0)
+    if (strncmp(buffer, "/create ", 8) == 0)
         return CMD_CREATE;
-    if (strncmp(buffer, "\\enter ", 7) == 0)
+    if (strncmp(buffer, "/enter ", 7) == 0)
         return CMD_ENTER;
-    if (strncmp(buffer, "\\leave", 6) == 0)
+    if (strncmp(buffer, "/leave", 6) == 0)
         return CMD_LEAVE;
-    if (strncmp(buffer, "\\exit", 5) == 0)
+    if (strncmp(buffer, "/exit", 5) == 0)
         return CMD_EXIT;
 
     return CMD_UNKNOWN;
@@ -245,7 +245,7 @@ void *handleClient(void *arg)
             break;
 
         case CMD_UNKNOWN:
-            char *msg = "Unknown command. Type \\help for help\n";
+            char *msg = "Unknown command. Type /help for help\n";
             send(client->socketFD, msg, strlen(msg), 0);
             break;
         }
