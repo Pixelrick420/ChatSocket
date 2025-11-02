@@ -33,13 +33,14 @@ void handleCreate(Client *client, char *buffer)
     char roomName[64] = {0};
     char password[64] = {0};
     char response[MSG_SIZE];
-    char *pFlag = strstr(buffer + 8, " -p ");
 
-    size_t buflen = strlen(buffer);
-    while (buflen > 0 && (buffer[buflen - 1] == '\n' || buffer[buflen - 1] == '\r'))
+    size_t len = strlen(buffer);
+    while (len > 0 && (buffer[len - 1] == '\n' || buffer[len - 1] == '\r'))
     {
-        buffer[--buflen] = '\0';
+        buffer[--len] = '\0';
     }
+
+    char *pFlag = strstr(buffer + 8, " -p ");
 
     if (pFlag)
     {
@@ -120,12 +121,6 @@ void handleEnter(Client *client, char *buffer)
             }
 
             pthread_mutex_lock(&globalContext->mutex);
-
-            char dbg[512];
-            snprintf(dbg, 512, "DEBUG: room='%s' stored='%s' input='%s' len=%zu\n",
-                     roomName, room->password, inputPass, passLen);
-            send(client->socketFD, dbg, strlen(dbg), 0);
-
             if (verifyHashedPass(room->password, roomName, inputPass))
             {
                 client->currentRoom = roomIdx;

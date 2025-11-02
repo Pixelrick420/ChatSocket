@@ -36,7 +36,7 @@ typedef struct sockaddr_in SocketAddress;
 typedef struct Room
 {
     char name[64];
-    char password[64];
+    char password[128];
     bool hasPassword;
     int *members;
     int memberCount;

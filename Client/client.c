@@ -25,23 +25,34 @@ void *receiveThread(void *arg)
                 strstr(buffer, "Failed") || strstr(buffer, "failed"))
             {
                 snprintf(formatted, sizeof(formatted), "\r%s[!] %s%s", COLOR_RED, buffer, COLOR_RESET);
+                print(formatted);
+                print(COLOR_GREEN ">>> " COLOR_RESET);
+                fflush(stdout);
             }
             else if (strstr(buffer, "joined") || strstr(buffer, "left") ||
                      strstr(buffer, "Room") || strstr(buffer, "Welcome") ||
                      strstr(buffer, "Commands:") || strstr(buffer, "created") ||
                      strstr(buffer, "Entered") || strstr(buffer, "Name set") ||
-                     strstr(buffer, "Password") || strstr(buffer, "Incorrect"))
+                     strstr(buffer, "Incorrect"))
             {
                 snprintf(formatted, sizeof(formatted), "\r%s[*] %s%s", COLOR_YELLOW, buffer, COLOR_RESET);
+                print(formatted);
+                print(COLOR_GREEN ">>> " COLOR_RESET);
+                fflush(stdout);
+            }
+            else if (strstr(buffer, "Password"))
+            {
+                snprintf(formatted, sizeof(formatted), "\r%s[*] %s%s", COLOR_YELLOW, buffer, COLOR_RESET);
+                print(formatted);
+                fflush(stdout);
             }
             else
             {
                 snprintf(formatted, sizeof(formatted), "\r%s<< %s%s", COLOR_CYAN, buffer, COLOR_RESET);
+                print(formatted);
+                print(COLOR_GREEN ">>> " COLOR_RESET);
+                fflush(stdout);
             }
-
-            print(formatted);
-            print(COLOR_GREEN ">>> " COLOR_RESET);
-            fflush(stdout);
         }
         else
         {
