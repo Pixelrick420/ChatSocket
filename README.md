@@ -17,6 +17,9 @@ ChatSocket is a TCP-based chat application that enables multiple users to commun
 - **Command Interface**: Simple command-based interaction for room management
 - **Automatic Cleanup**: Inactive rooms automatically cleaned up after 1 hour
 
+## Screenshot:
+![3 clients connected to one server(top left)](image.png)
+
 ## Technical Architecture
 
 ### Cryptographic Implementation
