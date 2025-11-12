@@ -175,8 +175,6 @@ void handleLeave(Client *client)
 
 void handleMessage(Client *client, char *buffer)
 {
-    print("RECIEVED : ");
-    print(buffer);
     if (client->currentRoom == -1)
     {
         char *msg = "Not in a room. Use /enter <room>\n";
