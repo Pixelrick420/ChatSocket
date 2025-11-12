@@ -209,7 +209,7 @@ int main(int argc, char *argv[])
     initMessageBuffer();
 
     int socketFD = createTCPIPv4Socket();
-    SocketAddress *address = getSocketAddress(IP, PORT, true);
+    SocketAddress *address = getSocketAddress(IP, port, true);
     int result = connectToSocket(socketFD, address, sizeof(*address));
 
     pthread_t pid;
