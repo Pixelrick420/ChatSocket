@@ -1,10 +1,51 @@
 #include "../Utils/socketUtil.h"
 #include "../Utils/sha256.h"
 #include "../Utils/aes.h"
-
+#include <errno.h>
 char *IP = "127.0.0.1";
 
 RoomEncryption currentEncryption = {0};
+#define MAX_BUFFERED_MESSAGES 100
+typedef struct
+{
+    char messages[MAX_BUFFERED_MESSAGES][MSG_SIZE * 2];
+    int head;
+    int tail;
+    int count;
+    pthread_mutex_t lock;
+} MessageBuffer;
+
+MessageBuffer msgBuffer = {0};
+
+void initMessageBuffer()
+{
+    msgBuffer.head = 0;
+    msgBuffer.tail = 0;
+    msgBuffer.count = 0;
+    pthread_mutex_init(&msgBuffer.lock, NULL);
+}
+
+void addToBuffer(const char *message)
+{
+    pthread_mutex_lock(&msgBuffer.lock);
+
+    if (msgBuffer.count < MAX_BUFFERED_MESSAGES)
+    {
+        strncpy(msgBuffer.messages[msgBuffer.tail], message, MSG_SIZE * 2 - 1);
+        msgBuffer.messages[msgBuffer.tail][MSG_SIZE * 2 - 1] = '\0';
+        msgBuffer.tail = (msgBuffer.tail + 1) % MAX_BUFFERED_MESSAGES;
+        msgBuffer.count++;
+    }
+    else
+    {
+        strncpy(msgBuffer.messages[msgBuffer.tail], message, MSG_SIZE * 2 - 1);
+        msgBuffer.messages[msgBuffer.tail][MSG_SIZE * 2 - 1] = '\0';
+        msgBuffer.tail = (msgBuffer.tail + 1) % MAX_BUFFERED_MESSAGES;
+        msgBuffer.head = (msgBuffer.head + 1) % MAX_BUFFERED_MESSAGES;
+    }
+
+    pthread_mutex_unlock(&msgBuffer.lock);
+}
 
 void clearScreen()
 {
@@ -14,7 +55,6 @@ void clearScreen()
 void processIncomingMessage(char *buffer, size_t received)
 {
     char formatted[MSG_SIZE * 2];
-
     char *colon = strchr(buffer, ':');
     char username[64] = {0};
     char *messageStart = buffer;
@@ -48,25 +88,25 @@ void processIncomingMessage(char *buffer, size_t received)
 
                 if (username[0])
                 {
-                    snprintf(formatted, sizeof(formatted), "\r%s<< %s: %s%s",
+                    snprintf(formatted, sizeof(formatted), "%s<< %s: %s%s\n",
                              COLOR_CYAN, username, decrypted, COLOR_RESET);
                 }
                 else
                 {
-                    snprintf(formatted, sizeof(formatted), "\r%s<< %s%s",
+                    snprintf(formatted, sizeof(formatted), "%s<< %s%s\n",
                              COLOR_CYAN, decrypted, COLOR_RESET);
                 }
-                print(formatted);
-                print(COLOR_GREEN "\n>>> " COLOR_RESET);
+                addToBuffer(formatted);
+                printf("\r\033[K%s" COLOR_GREEN ">>> " COLOR_RESET, formatted);
                 fflush(stdout);
                 return;
             }
         }
 
-        snprintf(formatted, sizeof(formatted), "\r%s[!] Failed to decrypt message%s",
+        snprintf(formatted, sizeof(formatted), "%s[!] Failed to decrypt message%s\n",
                  COLOR_RED, COLOR_RESET);
-        print(formatted);
-        print(COLOR_GREEN ">>> " COLOR_RESET);
+        addToBuffer(formatted);
+        printf("\r\033[K%s" COLOR_GREEN ">>> " COLOR_RESET, formatted);
         fflush(stdout);
         return;
     }
@@ -74,10 +114,7 @@ void processIncomingMessage(char *buffer, size_t received)
     if (strstr(buffer, "Error") || strstr(buffer, "error") ||
         strstr(buffer, "Failed") || strstr(buffer, "failed"))
     {
-        snprintf(formatted, sizeof(formatted), "\r%s[!] %s%s", COLOR_RED, buffer, COLOR_RESET);
-        print(formatted);
-        print(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
+        snprintf(formatted, sizeof(formatted), "%s[!] %s%s\n", COLOR_RED, buffer, COLOR_RESET);
     }
     else if (strstr(buffer, "joined") || strstr(buffer, "left") ||
              strstr(buffer, "Room") || strstr(buffer, "Welcome") ||
@@ -85,47 +122,55 @@ void processIncomingMessage(char *buffer, size_t received)
              strstr(buffer, "Entered") || strstr(buffer, "Name set") ||
              strstr(buffer, "Incorrect") || strstr(buffer, "Left"))
     {
-        snprintf(formatted, sizeof(formatted), "\r%s[*] %s%s", COLOR_YELLOW, buffer, COLOR_RESET);
-        print(formatted);
-        print(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
+        snprintf(formatted, sizeof(formatted), "%s[*] %s%s\n", COLOR_YELLOW, buffer, COLOR_RESET);
     }
     else if (strstr(buffer, "Password"))
     {
-        snprintf(formatted, sizeof(formatted), "\r%s[*] %s%s", COLOR_YELLOW, buffer, COLOR_RESET);
-        print(formatted);
+        snprintf(formatted, sizeof(formatted), "%s[*] %s%s", COLOR_YELLOW, buffer, COLOR_RESET);
+        addToBuffer(formatted);
+        printf("\r\033[K%s", formatted);
         fflush(stdout);
+        return;
     }
     else
     {
-        snprintf(formatted, sizeof(formatted), "\r%s<< %s%s", COLOR_CYAN, buffer, COLOR_RESET);
-        print(formatted);
-        print(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
+        snprintf(formatted, sizeof(formatted), "%s<< %s%s\n", COLOR_CYAN, buffer, COLOR_RESET);
     }
+
+    addToBuffer(formatted);
+
+    printf("\r\033[K%s" COLOR_GREEN ">>> " COLOR_RESET, formatted);
+    fflush(stdout);
 }
 
 void *receiveThread(void *arg)
 {
     int socketFD = *(int *)arg;
-    char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
+    char buffer[MSG_SIZE];
 
     while (true)
     {
-        size_t received = recv(socketFD, buffer, MSG_SIZE, 0);
+        ssize_t received = recv(socketFD, buffer, MSG_SIZE - 1, 0);
         if (received > 0)
         {
-            buffer[received] = 0;
+            buffer[received] = '\0';
             processIncomingMessage(buffer, received);
+        }
+        else if (received == 0)
+        {
+            printf("\r\033[K" COLOR_RED "[!] Connection closed by server\n" COLOR_RESET);
+            break;
         }
         else
         {
-            print(COLOR_RED "[!] Connection lost\n" COLOR_RESET);
-            break;
+            if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+            {
+                printf("\r\033[K" COLOR_RED "[!] Connection lost\n" COLOR_RESET);
+                break;
+            }
         }
     }
 
-    free(buffer);
     return NULL;
 }
 
@@ -137,6 +182,8 @@ void handleLeaveCommand(int socketFD)
 
 int main()
 {
+    initMessageBuffer();
+
     int socketFD = createTCPIPv4Socket();
     SocketAddress *address = getSocketAddress(IP, PORT, true);
     int result = connectToSocket(socketFD, address, sizeof(*address));
@@ -145,8 +192,7 @@ int main()
     pthread_create(&pid, NULL, receiveThread, &socketFD);
     pthread_detach(pid);
 
-    char *message = NULL;
-    size_t msgSize = 0;
+    char message[MSG_SIZE];
     bool awaitingPassword = false;
 
     clearScreen();
@@ -158,8 +204,13 @@ int main()
         printf(COLOR_GREEN ">>> " COLOR_RESET);
         fflush(stdout);
 
-        size_t charCount = getline(&message, &msgSize, stdin);
-        if (charCount <= 0)
+        if (!fgets(message, MSG_SIZE, stdin))
+        {
+            break;
+        }
+
+        size_t charCount = strlen(message);
+        if (charCount == 0)
             continue;
 
         if (message[charCount - 1] == '\n')
@@ -168,13 +219,16 @@ int main()
             charCount--;
         }
 
+        if (charCount == 0)
+            continue;
+
         if (awaitingPassword && message[0] != '/')
         {
             awaitingPassword = false;
             deriveKeyFromPassword(message, currentEncryption.key);
             currentEncryption.hasKey = true;
 
-            char toSend[MSG_SIZE];
+            char toSend[MSG_SIZE + 1];
             snprintf(toSend, MSG_SIZE, "%s\n", message);
             send(socketFD, toSend, strlen(toSend), 0);
 
@@ -182,12 +236,14 @@ int main()
             continue;
         }
 
+        // Handle exit command
         if (strcmp(message, "/exit") == 0)
         {
             send(socketFD, "/exit\n", 6, 0);
             break;
         }
 
+        // Handle clear command
         if (strcmp(message, "/clear") == 0)
         {
             clearScreen();
@@ -195,12 +251,14 @@ int main()
             continue;
         }
 
+        // Handle leave command
         if (strcmp(message, "/leave") == 0)
         {
             handleLeaveCommand(socketFD);
             continue;
         }
 
+        // Handle enter command
         if (strncmp(message, "/enter ", 7) == 0)
         {
             char roomName[64] = {0};
@@ -208,7 +266,7 @@ int main()
             strncpy(currentEncryption.roomName, roomName, sizeof(currentEncryption.roomName) - 1);
             awaitingPassword = true;
 
-            char toSend[MSG_SIZE];
+            char toSend[MSG_SIZE + 1];
             snprintf(toSend, MSG_SIZE, "%s\n", message);
             send(socketFD, toSend, strlen(toSend), 0);
             continue;
@@ -216,7 +274,7 @@ int main()
 
         if (message[0] == '/')
         {
-            char toSend[MSG_SIZE];
+            char toSend[MSG_SIZE + 1];
             snprintf(toSend, MSG_SIZE, "%s\n", message);
             send(socketFD, toSend, strlen(toSend), 0);
             continue;
@@ -225,7 +283,8 @@ int main()
         if (currentEncryption.hasKey)
         {
             unsigned char ciphertext[MSG_SIZE];
-            int ciphertextLen = encryptMessage((unsigned char *)message, strlen(message), currentEncryption.key, ciphertext);
+            int ciphertextLen = encryptMessage((unsigned char *)message, strlen(message),
+                                               currentEncryption.key, ciphertext);
 
             if (ciphertextLen > 0)
             {
@@ -233,8 +292,8 @@ int main()
                 encodeBase64(ciphertext, ciphertextLen, encoded);
 
                 char toSend[MSG_SIZE * 2 + 10];
-                snprintf(toSend, MSG_SIZE * 2, "ENC:%s\n", encoded);
-                send(socketFD, toSend, strlen(toSend), 0);
+                int len = snprintf(toSend, sizeof(toSend), "ENC:%s\n", encoded);
+                send(socketFD, toSend, len, 0);
             }
             else
             {
@@ -243,14 +302,14 @@ int main()
         }
         else
         {
-            char toSend[MSG_SIZE];
-            snprintf(toSend, MSG_SIZE, "%s\n", message);
-            send(socketFD, toSend, strlen(toSend), 0);
+            char toSend[MSG_SIZE + 1];
+            int len = snprintf(toSend, MSG_SIZE, "%s\n", message);
+            send(socketFD, toSend, len, 0);
         }
     }
 
     close(socketFD);
-    free(message);
     free(address);
+    pthread_mutex_destroy(&msgBuffer.lock);
     return 0;
 }
