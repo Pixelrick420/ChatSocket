@@ -180,8 +180,32 @@ void handleLeaveCommand(int socketFD)
     send(socketFD, "/leave\n", 7, 0);
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    char *IP = "127.0.0.1";
+    int port = PORT;
+
+    if (argc >= 2)
+    {
+        IP = argv[1];
+    }
+    if (argc >= 3)
+    {
+        port = atoi(argv[2]);
+        if (port <= 0 || port > 65535)
+        {
+            fprintf(stderr, "Invalid port number: %s\n", argv[2]);
+            fprintf(stderr, "Usage: %s [host/IP] [port]\n", argv[0]);
+            return 1;
+        }
+    }
+
+    if (argc > 3)
+    {
+        fprintf(stderr, "Usage: %s [host/IP] [port]\n", argv[0]);
+        fprintf(stderr, "Example: %s 0.tcp.ngrok.io 12345\n", argv[0]);
+        return 1;
+    }
     initMessageBuffer();
 
     int socketFD = createTCPIPv4Socket();
@@ -236,14 +260,12 @@ int main()
             continue;
         }
 
-        // Handle exit command
         if (strcmp(message, "/exit") == 0)
         {
             send(socketFD, "/exit\n", 6, 0);
             break;
         }
 
-        // Handle clear command
         if (strcmp(message, "/clear") == 0)
         {
             clearScreen();
@@ -251,14 +273,12 @@ int main()
             continue;
         }
 
-        // Handle leave command
         if (strcmp(message, "/leave") == 0)
         {
             handleLeaveCommand(socketFD);
             continue;
         }
 
-        // Handle enter command
         if (strncmp(message, "/enter ", 7) == 0)
         {
             char roomName[64] = {0};
