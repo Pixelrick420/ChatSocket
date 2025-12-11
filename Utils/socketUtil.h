@@ -2,7 +2,7 @@
 #define SOCKETUTIL_H
 
 #include <arpa/inet.h>
-#include <asm-generic/termbits.h>
+#include <ctype.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 

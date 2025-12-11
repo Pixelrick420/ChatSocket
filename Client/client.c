@@ -4,6 +4,7 @@
 
 char* IP = "127.0.0.1";
 int SERVER_PORT = 2077;
+int globalSocketFD = -1;
 
 RoomEncryption currentEncryption = {0};
 
@@ -123,8 +124,7 @@ void processIncomingMessage(char* buffer, size_t received)
     }
     else if (strstr(buffer, "joined") || strstr(buffer, "left") || strstr(buffer, "Room") ||
              strstr(buffer, "Welcome") || strstr(buffer, "Commands:") || strstr(buffer, "created") ||
-             strstr(buffer, "Entered") || strstr(buffer, "Name set") || strstr(buffer, "Incorrect") ||
-             strstr(buffer, "Left"))
+             strstr(buffer, "Name set") || strstr(buffer, "Incorrect") || strstr(buffer, "Left"))
     {
         snprintf(formatted, sizeof(formatted), "%s[*] %s%s\n", COLOR_YELLOW, buffer, COLOR_RESET);
         print(formatted);
@@ -135,6 +135,16 @@ void processIncomingMessage(char* buffer, size_t received)
         print(formatted);
         restoreInputLine();
         return;
+    }
+    else if (strstr(buffer, "Entered"))
+    {
+        ssize_t sent = send(globalSocketFD, "Entered the Room\n", 17, 0);
+        if (sent < 0)
+        {
+            print(COLOR_RED "[!] Failed to send enter notification: Connection error\n" COLOR_RESET);
+        }
+        snprintf(formatted, sizeof(formatted), "%s[*] %s%s\n", COLOR_YELLOW, buffer, COLOR_RESET);
+        print(formatted);
     }
     else
     {
@@ -207,7 +217,14 @@ void* receiveThread(void* arg)
 void handleLeaveCommand(int socketFD)
 {
     memset(&currentEncryption, 0, sizeof(currentEncryption));
-    ssize_t sent = send(socketFD, "/leave\n", 7, 0);
+    ssize_t sent = send(socketFD, "Left the Room\n", 15, 0);
+
+    if (sent < 0)
+    {
+        print(COLOR_RED "[!] Failed to send leave command: Connection error\n" COLOR_RESET);
+    }
+
+    sent = send(socketFD, "/leave\n", 7, 0);
 
     if (sent < 0)
     {
@@ -263,6 +280,7 @@ int main(int argc, char* argv[])
     }
 
     int socketFD = createTCPIPv4Socket();
+    globalSocketFD = socketFD;
 
     if (socketFD < 0)
     {
@@ -353,16 +371,16 @@ int main(int argc, char* argv[])
         char c;
         if (read(STDIN_FILENO, &c, 1) != 1)
         {
-            break;
+            continue;
         }
 
         if (c == '\n' || c == '\r')
         {
+            message[msgLen] = '\0';
             printf("\n");
 
             if (msgLen > 0)
             {
-                message[msgLen] = '\0';
 
                 if (awaitingPassword && message[0] != '/')
                 {
