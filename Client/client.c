@@ -238,8 +238,38 @@ bool sendToServer(int socketFD, const char *message)
     return true;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
+    char *serverIP = IP;
+    int serverPort = PORT;
+
+    if (argc >= 2)
+    {
+        char *arg = argv[1];
+        char *colon = strchr(arg, ':');
+
+        if (colon)
+        {
+            *colon = '\0';
+            serverIP = arg;
+            serverPort = atoi(colon + 1);
+        }
+        else if (strchr(arg, '.') || !isdigit(arg[0]))
+        {
+            serverIP = arg;
+        }
+        else
+        {
+            serverPort = atoi(arg);
+        }
+    }
+
+    if (argc >= 3)
+    {
+        serverPort = atoi(argv[2]);
+    }
+
+    SocketAddress *address = getSocketAddress(serverIP, serverPort, true);
     int socketFD = createTCPIPv4Socket();
 
     if (socketFD < 0)
@@ -286,7 +316,7 @@ int main()
     clearScreen();
     print("SocketChat CLI (E2E Encrypted)\n");
     print("Connected to " COLOR_GREEN);
-    printf("%s:%d\n", IP, PORT);
+    printf("%s:%d\n", serverIP, serverPort);
     print(COLOR_RESET "Type '/exit' to quit | Type '/clear' to clear screen\n\n");
 
     while (true)
