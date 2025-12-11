@@ -175,8 +175,6 @@ void handleLeave(Client *client)
 
 void handleMessage(Client *client, char *buffer)
 {
-    print("RECIEVED : ");
-    print(buffer);
     if (client->currentRoom == -1)
     {
         char *msg = "Not in a room. Use /enter <room>\n";
@@ -243,12 +241,6 @@ void *handleClient(void *arg)
             break;
 
         buffer[received] = 0;
-        if (strncmp(buffer, "GET ", 4) == 0)
-        {
-            char *http_response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
-            send(client->socketFD, http_response, strlen(http_response), 0);
-            goto cleanup;
-        }
         CommandType cmd = parseCommand(buffer);
 
         switch (cmd)
@@ -312,6 +304,13 @@ int main()
     int server_port = port_env ? atoi(port_env) : PORT;
 
     int serverSocketFD = createTCPIPv4Socket();
+
+    int opt = 1;
+    if (setsockopt(serverSocketFD, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    {
+        perror("setsockopt SO_REUSEADDR failed");
+    }
+
     SocketAddress *address = getSocketAddress(LOCALHOST, server_port, false);
     bindServerToSocket(serverSocketFD, address, sizeof(*address));
     printf("Server starting on port %d...\n", server_port);
