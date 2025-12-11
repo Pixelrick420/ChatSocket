@@ -2,6 +2,7 @@
 #define SOCKETUTIL_H
 
 #include <arpa/inet.h>
+#include <asm-generic/termbits.h>
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>

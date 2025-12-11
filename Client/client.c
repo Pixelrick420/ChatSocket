@@ -17,6 +17,26 @@ typedef struct
 
 InputState inputState = {.buffer = {0}, .length = 0, .mutex = PTHREAD_MUTEX_INITIALIZER, .connected = true};
 
+struct termios orig_termios;
+
+void disableRawMode()
+{
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+void enableRawMode()
+{
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    atexit(disableRawMode);
+
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
 void clearScreen()
 {
     print("\033[2J\033[H");
@@ -25,27 +45,16 @@ void clearScreen()
 void saveAndClearInputLine()
 {
     pthread_mutex_lock(&inputState.mutex);
-
     print("\r\033[K");
     fflush(stdout);
-
     pthread_mutex_unlock(&inputState.mutex);
 }
 
 void restoreInputLine()
 {
     pthread_mutex_lock(&inputState.mutex);
-
-    if (inputState.length > 0)
-    {
-        printf(COLOR_GREEN ">>> " COLOR_RESET "%s", inputState.buffer);
-    }
-    else
-    {
-        printf(COLOR_GREEN ">>> " COLOR_RESET);
-    }
+    printf(COLOR_GREEN ">>> " COLOR_RESET "%s", inputState.buffer);
     fflush(stdout);
-
     pthread_mutex_unlock(&inputState.mutex);
 }
 
@@ -172,13 +181,11 @@ void* receiveThread(void* arg)
         }
         else if (received == 0)
         {
-
             handleDisconnect(socketFD);
             break;
         }
         else
         {
-
             if (errno == ECONNRESET || errno == EPIPE)
             {
                 handleDisconnect(socketFD);
@@ -238,7 +245,6 @@ bool sendToServer(int socketFD, const char* message)
 
 int main(int argc, char* argv[])
 {
-
     if (argc > 1)
     {
         char* address = argv[1];
@@ -246,14 +252,12 @@ int main(int argc, char* argv[])
 
         if (colon)
         {
-
             *colon = '\0';
             IP = address;
             SERVER_PORT = atoi(colon + 1);
         }
         else
         {
-
             IP = address;
         }
     }
@@ -320,19 +324,23 @@ int main(int argc, char* argv[])
     }
     pthread_detach(pid);
 
-    char* message = NULL;
-    size_t msgSize = 0;
-    bool awaitingPassword = false;
-
     clearScreen();
     print("SocketChat CLI (E2E Encrypted)\n");
     print("Connected to " COLOR_GREEN);
     printf("%s:%d\n", IP, SERVER_PORT);
     print(COLOR_RESET "Type '/exit' to quit | Type '/clear' to clear screen\n\n");
 
+    enableRawMode();
+
+    bool awaitingPassword = false;
+    char message[MSG_SIZE] = {0};
+    size_t msgLen = 0;
+
+    printf(COLOR_GREEN ">>> " COLOR_RESET);
+    fflush(stdout);
+
     while (true)
     {
-
         pthread_mutex_lock(&inputState.mutex);
         bool connected = inputState.connected;
         pthread_mutex_unlock(&inputState.mutex);
@@ -342,152 +350,202 @@ int main(int argc, char* argv[])
             break;
         }
 
-        printf(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
-
-        ssize_t charCount = getline(&message, &msgSize, stdin);
-
-        if (charCount <= 0)
+        char c;
+        if (read(STDIN_FILENO, &c, 1) != 1)
         {
-            if (feof(stdin))
-            {
-                print("\n");
-                break;
-            }
-            continue;
-        }
-
-        if (message[charCount - 1] == '\n')
-        {
-            message[charCount - 1] = '\0';
-            charCount--;
-        }
-
-        pthread_mutex_lock(&inputState.mutex);
-        strncpy(inputState.buffer, message, MSG_SIZE - 1);
-        inputState.length = charCount;
-        pthread_mutex_unlock(&inputState.mutex);
-
-        if (awaitingPassword && message[0] != '/')
-        {
-            awaitingPassword = false;
-            deriveKeyFromPassword(message, currentEncryption.key);
-            currentEncryption.hasKey = true;
-
-            char toSend[MSG_SIZE];
-            snprintf(toSend, MSG_SIZE, "%s\n", message);
-            sendToServer(socketFD, toSend);
-
-            memset(message, 0, strlen(message));
-
-            pthread_mutex_lock(&inputState.mutex);
-            inputState.buffer[0] = '\0';
-            inputState.length = 0;
-            pthread_mutex_unlock(&inputState.mutex);
-
-            continue;
-        }
-
-        if (strcmp(message, "/exit") == 0)
-        {
-            sendToServer(socketFD, "/exit\n");
             break;
         }
 
-        if (strcmp(message, "/clear") == 0)
+        if (c == '\n' || c == '\r')
         {
-            clearScreen();
-            print("SocketChat CLI (E2E Encrypted)\n\n");
+            printf("\n");
 
-            pthread_mutex_lock(&inputState.mutex);
-            inputState.buffer[0] = '\0';
-            inputState.length = 0;
-            pthread_mutex_unlock(&inputState.mutex);
-
-            continue;
-        }
-
-        if (strcmp(message, "/leave") == 0)
-        {
-            handleLeaveCommand(socketFD);
-
-            pthread_mutex_lock(&inputState.mutex);
-            inputState.buffer[0] = '\0';
-            inputState.length = 0;
-            pthread_mutex_unlock(&inputState.mutex);
-
-            continue;
-        }
-
-        if (strncmp(message, "/enter ", 7) == 0)
-        {
-            char roomName[64] = {0};
-            sscanf(message + 7, "%63s", roomName);
-            strncpy(currentEncryption.roomName, roomName, sizeof(currentEncryption.roomName) - 1);
-            awaitingPassword = true;
-
-            char toSend[MSG_SIZE];
-            snprintf(toSend, MSG_SIZE, "%s\n", message);
-            sendToServer(socketFD, toSend);
-
-            pthread_mutex_lock(&inputState.mutex);
-            inputState.buffer[0] = '\0';
-            inputState.length = 0;
-            pthread_mutex_unlock(&inputState.mutex);
-
-            continue;
-        }
-
-        if (message[0] == '/')
-        {
-            char toSend[MSG_SIZE];
-            snprintf(toSend, MSG_SIZE, "%s\n", message);
-            sendToServer(socketFD, toSend);
-
-            pthread_mutex_lock(&inputState.mutex);
-            inputState.buffer[0] = '\0';
-            inputState.length = 0;
-            pthread_mutex_unlock(&inputState.mutex);
-
-            continue;
-        }
-
-        if (currentEncryption.hasKey)
-        {
-            unsigned char ciphertext[MSG_SIZE];
-            int ciphertextLen =
-                encryptMessage((unsigned char*) message, strlen(message), currentEncryption.key, ciphertext);
-
-            if (ciphertextLen > 0)
+            if (msgLen > 0)
             {
-                char encoded[MSG_SIZE * 2];
-                encodeBase64(ciphertext, ciphertextLen, encoded);
+                message[msgLen] = '\0';
 
-                char toSend[MSG_SIZE * 2 + 10];
-                snprintf(toSend, MSG_SIZE * 2, "ENC:%s\n", encoded);
-                sendToServer(socketFD, toSend);
+                if (awaitingPassword && message[0] != '/')
+                {
+                    awaitingPassword = false;
+                    deriveKeyFromPassword(message, currentEncryption.key);
+                    currentEncryption.hasKey = true;
+
+                    char toSend[MSG_SIZE];
+                    snprintf(toSend, MSG_SIZE, "%s\n", message);
+                    sendToServer(socketFD, toSend);
+
+                    memset(message, 0, msgLen);
+                    msgLen = 0;
+
+                    pthread_mutex_lock(&inputState.mutex);
+                    inputState.buffer[0] = '\0';
+                    inputState.length = 0;
+                    pthread_mutex_unlock(&inputState.mutex);
+
+                    printf(COLOR_GREEN ">>> " COLOR_RESET);
+                    fflush(stdout);
+                    continue;
+                }
+
+                if (strcmp(message, "/exit") == 0)
+                {
+                    sendToServer(socketFD, "/exit\n");
+                    break;
+                }
+
+                if (strcmp(message, "/clear") == 0)
+                {
+                    clearScreen();
+                    print("SocketChat CLI (E2E Encrypted)\n\n");
+
+                    msgLen = 0;
+                    message[0] = '\0';
+
+                    pthread_mutex_lock(&inputState.mutex);
+                    inputState.buffer[0] = '\0';
+                    inputState.length = 0;
+                    pthread_mutex_unlock(&inputState.mutex);
+
+                    printf(COLOR_GREEN ">>> " COLOR_RESET);
+                    fflush(stdout);
+                    continue;
+                }
+
+                if (strcmp(message, "/leave") == 0)
+                {
+                    handleLeaveCommand(socketFD);
+
+                    msgLen = 0;
+                    message[0] = '\0';
+
+                    pthread_mutex_lock(&inputState.mutex);
+                    inputState.buffer[0] = '\0';
+                    inputState.length = 0;
+                    pthread_mutex_unlock(&inputState.mutex);
+
+                    printf(COLOR_GREEN ">>> " COLOR_RESET);
+                    fflush(stdout);
+                    continue;
+                }
+
+                if (strncmp(message, "/enter ", 7) == 0)
+                {
+                    char roomName[64] = {0};
+                    sscanf(message + 7, "%63s", roomName);
+                    strncpy(currentEncryption.roomName, roomName, sizeof(currentEncryption.roomName) - 1);
+                    awaitingPassword = true;
+
+                    char toSend[MSG_SIZE];
+                    snprintf(toSend, MSG_SIZE, "%s\n", message);
+                    sendToServer(socketFD, toSend);
+
+                    msgLen = 0;
+                    message[0] = '\0';
+
+                    pthread_mutex_lock(&inputState.mutex);
+                    inputState.buffer[0] = '\0';
+                    inputState.length = 0;
+                    pthread_mutex_unlock(&inputState.mutex);
+
+                    printf(COLOR_GREEN ">>> " COLOR_RESET);
+                    fflush(stdout);
+                    continue;
+                }
+
+                if (message[0] == '/')
+                {
+                    char toSend[MSG_SIZE];
+                    snprintf(toSend, MSG_SIZE, "%s\n", message);
+                    sendToServer(socketFD, toSend);
+
+                    msgLen = 0;
+                    message[0] = '\0';
+
+                    pthread_mutex_lock(&inputState.mutex);
+                    inputState.buffer[0] = '\0';
+                    inputState.length = 0;
+                    pthread_mutex_unlock(&inputState.mutex);
+
+                    printf(COLOR_GREEN ">>> " COLOR_RESET);
+                    fflush(stdout);
+                    continue;
+                }
+
+                if (currentEncryption.hasKey)
+                {
+                    unsigned char ciphertext[MSG_SIZE];
+                    int ciphertextLen =
+                        encryptMessage((unsigned char*) message, msgLen, currentEncryption.key, ciphertext);
+
+                    if (ciphertextLen > 0)
+                    {
+                        char encoded[MSG_SIZE * 2];
+                        encodeBase64(ciphertext, ciphertextLen, encoded);
+
+                        char toSend[MSG_SIZE * 2 + 10];
+                        snprintf(toSend, MSG_SIZE * 2, "ENC:%s\n", encoded);
+                        sendToServer(socketFD, toSend);
+                    }
+                    else
+                    {
+                        print(COLOR_RED "[!] Failed to encrypt message\n" COLOR_RESET);
+                    }
+                }
+                else
+                {
+                    char toSend[MSG_SIZE];
+                    snprintf(toSend, MSG_SIZE, "%s\n", message);
+                    sendToServer(socketFD, toSend);
+                }
+
+                msgLen = 0;
+                message[0] = '\0';
+
+                pthread_mutex_lock(&inputState.mutex);
+                inputState.buffer[0] = '\0';
+                inputState.length = 0;
+                pthread_mutex_unlock(&inputState.mutex);
             }
-            else
-            {
-                print(COLOR_RED "[!] Failed to encrypt message\n" COLOR_RESET);
-            }
+
+            printf(COLOR_GREEN ">>> " COLOR_RESET);
+            fflush(stdout);
         }
-        else
+        else if (c == 127 || c == 8)
         {
-            char toSend[MSG_SIZE];
-            snprintf(toSend, MSG_SIZE, "%s\n", message);
-            sendToServer(socketFD, toSend);
-        }
+            if (msgLen > 0)
+            {
+                msgLen--;
+                message[msgLen] = '\0';
 
-        pthread_mutex_lock(&inputState.mutex);
-        inputState.buffer[0] = '\0';
-        inputState.length = 0;
-        pthread_mutex_unlock(&inputState.mutex);
+                printf("\b \b");
+                fflush(stdout);
+
+                pthread_mutex_lock(&inputState.mutex);
+                strncpy(inputState.buffer, message, MSG_SIZE - 1);
+                inputState.buffer[msgLen] = '\0';
+                inputState.length = msgLen;
+                pthread_mutex_unlock(&inputState.mutex);
+            }
+        }
+        else if (isprint(c) && msgLen < MSG_SIZE - 1)
+        {
+            message[msgLen++] = c;
+            message[msgLen] = '\0';
+
+            printf("%c", c);
+            fflush(stdout);
+
+            pthread_mutex_lock(&inputState.mutex);
+            strncpy(inputState.buffer, message, MSG_SIZE - 1);
+            inputState.buffer[msgLen] = '\0';
+            inputState.length = msgLen;
+            pthread_mutex_unlock(&inputState.mutex);
+        }
     }
 
+    disableRawMode();
     print(COLOR_YELLOW "\n[*] Shutting down...\n" COLOR_RESET);
     close(socketFD);
-    free(message);
     free(address);
     pthread_mutex_destroy(&inputState.mutex);
 
