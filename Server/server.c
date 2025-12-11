@@ -1,12 +1,12 @@
-#include "../Utils/socketUtil.h"
 #include "../Utils/sha256.h"
+#include "../Utils/socketUtil.h"
 
-char *LOCALHOST = "0.0.0.0";
-int BACKLOG = 10;
-int MAX_CLIENTS = 32;
-ServerContext *globalContext = NULL;
+char* LOCALHOST              = "0.0.0.0";
+int BACKLOG                  = 10;
+int MAX_CLIENTS              = 32;
+ServerContext* globalContext = NULL;
 
-void handleHelp(Client *client)
+void handleHelp(Client* client)
 {
     char response[MSG_SIZE];
     snprintf(response, MSG_SIZE,
@@ -20,7 +20,7 @@ void handleHelp(Client *client)
     send(client->socketFD, response, strlen(response), 0);
 }
 
-void handleName(Client *client, char *buffer)
+void handleName(Client* client, char* buffer)
 {
     char response[MSG_SIZE];
     sscanf(buffer + 6, "%63s", client->name);
@@ -28,7 +28,7 @@ void handleName(Client *client, char *buffer)
     send(client->socketFD, response, strlen(response), 0);
 }
 
-void handleCreate(Client *client, char *buffer)
+void handleCreate(Client* client, char* buffer)
 {
     char roomName[64] = {0};
     char password[64] = {0};
@@ -40,7 +40,7 @@ void handleCreate(Client *client, char *buffer)
         buffer[--len] = '\0';
     }
 
-    char *pFlag = strstr(buffer + 8, " -p ");
+    char* pFlag = strstr(buffer + 8, " -p ");
 
     if (pFlag)
     {
@@ -59,10 +59,10 @@ void handleCreate(Client *client, char *buffer)
     }
     else
     {
-        Room *room;
+        Room* room;
         if (pFlag)
         {
-            char *stored = createHashedPass(roomName, password);
+            char* stored = createHashedPass(roomName, password);
             if (!stored)
             {
                 snprintf(response, MSG_SIZE, "Failed to create room (hash error)\n");
@@ -85,7 +85,7 @@ void handleCreate(Client *client, char *buffer)
     send(client->socketFD, response, strlen(response), 0);
 }
 
-void handleEnter(Client *client, char *buffer)
+void handleEnter(Client* client, char* buffer)
 {
     char roomName[64];
     char response[MSG_SIZE];
@@ -102,11 +102,11 @@ void handleEnter(Client *client, char *buffer)
         return;
     }
 
-    Room *room = globalContext->rooms[roomIdx];
+    Room* room = globalContext->rooms[roomIdx];
 
     if (room->hasPassword)
     {
-        char *prompt = "Password: ";
+        char* prompt = "Password: ";
         send(client->socketFD, prompt, strlen(prompt), 0);
         pthread_mutex_unlock(&globalContext->mutex);
 
@@ -123,7 +123,7 @@ void handleEnter(Client *client, char *buffer)
             pthread_mutex_lock(&globalContext->mutex);
             if (verifyHashedPass(room->password, roomName, inputPass))
             {
-                client->currentRoom = roomIdx;
+                client->currentRoom                = roomIdx;
                 room->members[room->memberCount++] = client->socketFD;
                 snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
             }
@@ -137,7 +137,7 @@ void handleEnter(Client *client, char *buffer)
     }
     else
     {
-        client->currentRoom = roomIdx;
+        client->currentRoom                = roomIdx;
         room->members[room->memberCount++] = client->socketFD;
         snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
         pthread_mutex_unlock(&globalContext->mutex);
@@ -145,17 +145,17 @@ void handleEnter(Client *client, char *buffer)
     }
 }
 
-void handleLeave(Client *client)
+void handleLeave(Client* client)
 {
     if (client->currentRoom == -1)
     {
-        char *msg = "Not in a room\n";
+        char* msg = "Not in a room\n";
         send(client->socketFD, msg, strlen(msg), 0);
         return;
     }
 
     pthread_mutex_lock(&globalContext->mutex);
-    Room *room = globalContext->rooms[client->currentRoom];
+    Room* room = globalContext->rooms[client->currentRoom];
 
     for (int i = 0; i < room->memberCount; i++)
     {
@@ -169,15 +169,15 @@ void handleLeave(Client *client)
 
     client->currentRoom = -1;
     pthread_mutex_unlock(&globalContext->mutex);
-    char *msg = "Left Room\n";
+    char* msg = "Left Room\n";
     send(client->socketFD, msg, strlen(msg), 0);
 }
 
-void handleMessage(Client *client, char *buffer)
+void handleMessage(Client* client, char* buffer)
 {
     if (client->currentRoom == -1)
     {
-        char *msg = "Not in a room. Use /enter <room>\n";
+        char* msg = "Not in a room. Use /enter <room>\n";
         send(client->socketFD, msg, strlen(msg), 0);
         return;
     }
@@ -187,7 +187,7 @@ void handleMessage(Client *client, char *buffer)
     broadcastToRoom(globalContext, client->currentRoom, client->socketFD, response, strlen(response));
 }
 
-CommandType parseCommand(char *buffer)
+CommandType parseCommand(char* buffer)
 {
     if (buffer[0] != '/')
         return CMD_MESSAGE;
@@ -208,13 +208,13 @@ CommandType parseCommand(char *buffer)
     return CMD_UNKNOWN;
 }
 
-void cleanupClientRoom(Client *client)
+void cleanupClientRoom(Client* client)
 {
     if (client->currentRoom == -1)
         return;
 
     pthread_mutex_lock(&globalContext->mutex);
-    Room *room = globalContext->rooms[client->currentRoom];
+    Room* room = globalContext->rooms[client->currentRoom];
 
     for (int i = 0; i < room->memberCount; i++)
     {
@@ -228,11 +228,11 @@ void cleanupClientRoom(Client *client)
     pthread_mutex_unlock(&globalContext->mutex);
 }
 
-void *handleClient(void *arg)
+void* handleClient(void* arg)
 {
-    Client *client = (Client *)arg;
-    char *buffer = (char *)malloc(sizeof(char) * MSG_SIZE);
-    bool running = true;
+    Client* client = (Client*) arg;
+    char* buffer   = (char*) malloc(sizeof(char) * MSG_SIZE);
+    bool running   = true;
 
     while (running)
     {
@@ -241,7 +241,7 @@ void *handleClient(void *arg)
             break;
 
         buffer[received] = 0;
-        CommandType cmd = parseCommand(buffer);
+        CommandType cmd  = parseCommand(buffer);
 
         switch (cmd)
         {
@@ -274,7 +274,7 @@ void *handleClient(void *arg)
             break;
 
         case CMD_UNKNOWN:
-            char *msg = "Unknown command. Type /help for help\n";
+            char* msg = "Unknown command. Type /help for help\n";
             send(client->socketFD, msg, strlen(msg), 0);
             break;
         }
@@ -288,7 +288,7 @@ cleanup:
     return NULL;
 }
 
-void *cleanupThread(void *arg)
+void* cleanupThread(void* arg)
 {
     while (true)
     {
@@ -300,7 +300,7 @@ void *cleanupThread(void *arg)
 
 int main()
 {
-    char *port_env = getenv("PORT");
+    char* port_env  = getenv("PORT");
     int server_port = port_env ? atoi(port_env) : PORT;
 
     int serverSocketFD = createTCPIPv4Socket();
@@ -311,7 +311,7 @@ int main()
         perror("setsockopt SO_REUSEADDR failed");
     }
 
-    SocketAddress *address = getSocketAddress(LOCALHOST, server_port, false);
+    SocketAddress* address = getSocketAddress(LOCALHOST, server_port, false);
     bindServerToSocket(serverSocketFD, address, sizeof(*address));
     printf("Server starting on port %d...\n", server_port);
 
@@ -330,7 +330,7 @@ int main()
     while (true)
     {
         SocketAddress clientAddr;
-        Client *client = createClient(serverSocketFD, &clientAddr);
+        Client* client = createClient(serverSocketFD, &clientAddr);
 
         addClient(globalContext, client);
         pthread_t id;
