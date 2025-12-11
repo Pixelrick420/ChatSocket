@@ -1,6 +1,7 @@
 # ChatSocket
 
-A multi-room, end-to-end encrypted chat server application written in C. Features password-protected rooms, client-side encryption, and secure message broadcasting.
+A multi-room, end-to-end encrypted chat server application written in C. Features password-protected rooms, client-side encryption, secure message broadcasting, and ngrok support for remote connections.
+
 Huge thanks to [STUDevLantern](https://www.youtube.com/@STUDevLantern) on Youtube for making [this](https://www.youtube.com/playlist?list=PLu_a4hjJo1mTiX7v_Uj2TixvjXsNsY7SZ) course on Socket Programming.
 
 ## Overview
@@ -15,7 +16,11 @@ ChatSocket is a TCP-based chat application that enables multiple users to commun
 - **Room-Based Key Derivation**: Each room derives encryption keys from user-provided passwords
 - **Concurrent Connections**: Multi-threaded server supporting up to 32 simultaneous clients
 - **Command Interface**: Simple command-based interaction for room management
-- **Automatic Cleanup**: Inactive rooms automatically cleaned up after 1 hour
+- **Automatic Cleanup**: Inactive rooms automatically cleaned up after 10 minutes
+- **Remote Access**: Built-in ngrok support for exposing server to the internet
+- **Raw Mode Terminal**: Real-time character input without waiting for Enter key
+- **Room Entry Notifications**: Automatic broadcast when users enter rooms
+- **Color-Coded Interface**: Visual distinction between messages, errors, and notifications
 
 ## Screenshot:
 ![3 clients connected to one server(top left)](image.png)
@@ -42,8 +47,8 @@ The SHA-256 implementation is based on the work from [Lulu's Blog on Lucidar](ht
 ### Network Architecture
 
 - **Protocol**: TCP/IPv4
-- **Default Port**: Currently 2077, Configurable via `PORT` environment variable, 
-- **Message Size**: 1024 bytes maximum, also configurable by changing memory allocation
+- **Default Port**: 2077 (configurable via `PORT` environment variable)
+- **Message Size**: 2048 bytes maximum (MSG_SIZE), configurable by changing memory allocation
 - **Connection Model**: One thread per client connection on the server side. On the client side 2 threads are active: 1 for sending and 1 for receiving messages.
 
 ### Server Components
@@ -53,38 +58,55 @@ The SHA-256 implementation is based on the work from [Lulu's Blog on Lucidar](ht
 - Maximum 32 members per room
 - Automatic cleanup of inactive rooms (1 hour timeout)
 - Password verification with constant-time comparison
+- Broadcast notifications for room entry/exit
 
 #### Client Handling
 - Thread-per-client model with detached threads
 - Mutex-protected shared state
 - Command parsing and routing
 - Message broadcasting within rooms
+- Support for both encrypted and plaintext messages
 
 ### Client Components
 
+#### Terminal Interface
+- Raw mode terminal input for real-time character processing
+- Backspace support for editing input
+- Color-coded output (cyan for messages, red for errors, yellow for notifications, green for prompts)
+- Clear screen functionality
+- Input line preservation during message reception
+
 #### Message Processing
 - Separate receive thread for asynchronous message handling
-- Color-coded message display (cyan for messages, red for errors, yellow for notifications)
 - Automatic encryption detection and decryption
 - Base64 encoding/decoding for binary data transmission
+- Proper handling of encrypted and plaintext messages
+- Username extraction and display
+
+#### Connection Management
+- Automatic disconnect detection
+- Graceful connection loss handling
+- Reconnection support via address specification
+- Support for both local and remote server connections
 
 #### Encryption State
 - Per-room encryption context
 - Key derivation on room entry
 - Automatic encryption for messages in protected rooms
+- Separate handling for password-protected and public rooms
 
 ## Project Structure
 
 ```
 ChatSocket/
 ├── Client/
-│   ├── client.c           # Client implementation
+│   ├── client.c           # Client implementation with raw mode terminal
 │   ├── client             # Compiled client binary
 │   └── run.sh             # Client build and run script
 ├── Server/
-│   ├── server.c           # Server implementation
+│   ├── server.c           # Server implementation with room notifications
 │   ├── server             # Compiled server binary
-│   └── run.sh             # Server build and run script
+│   └── run.sh             # Server build and run script with ngrok support
 ├── Utils/
 │   ├── aes.c              # AES encryption implementation
 │   ├── aes.h              # AES header
@@ -108,11 +130,13 @@ ChatSocket/
 - OpenSSL (libssl, libcrypto) - for AES operations
 - Standard C library
 - POSIX sockets
+- termios - for raw mode terminal
 
 ## Building and Running
 
 ### Server
 
+#### Local Server
 ```bash
 cd Server
 gcc server.c ../Utils/socketUtil.c ../Utils/sha256.c -o server -lpthread
@@ -125,10 +149,36 @@ cd Server
 ./run.sh
 ```
 
-The server listens on `0.0.0.0` and the port specified by the `PORT` environment variable (default is defined in `socketUtil.h`).
+The server listens on `0.0.0.0:2077` by default.
+
+#### Remote Server (with ngrok)
+```bash
+cd Server
+./run.sh ngrok [port]
+```
+
+This will:
+1. Compile and start the server
+2. Launch ngrok to expose the server
+3. Display the public address for clients to connect to
+4. Show the ngrok dashboard URL (http://localhost:4040)
+
+Example:
+```bash
+./run.sh ngrok 2077
+```
+
+Output:
+```
+================================================
+Server Address: 0.tcp.ngrok.io:12345
+ngrok Dashboard: http://localhost:4040
+================================================
+```
 
 ### Client
 
+#### Connecting to Local Server
 ```bash
 cd Client
 gcc client.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c -o client -lpthread -lssl -lcrypto
@@ -141,7 +191,18 @@ cd Client
 ./run.sh
 ```
 
-The client connects to `127.0.0.1` by default. Modify the `IP` variable in `client.c` to connect to a remote server.
+#### Connecting to Remote Server
+```bash
+cd Client
+./run.sh <address:port>
+```
+
+Example:
+```bash
+./run.sh 0.tcp.ngrok.io:12345
+```
+
+The client connects to `127.0.0.1:2077` by default. Specify an address to connect to a remote server.
 
 ## Usage
 
@@ -158,45 +219,57 @@ The client connects to `127.0.0.1` by default. Modify the `IP` variable in `clie
 
 ### Workflow Example
 
-1. Start the server:
+1. Start the server (with ngrok for remote access):
    ```bash
-   cd Server && ./run.sh
+   cd Server && ./run.sh ngrok 2077
    ```
+   Note the public address displayed.
 
 2. Start a client and set your name:
-   ```
-   cd Client && ./run.sh
+   ```bash
+   cd Client && ./run.sh 0.tcp.ngrok.io:12345
    >>> /name Alice
    ```
 
 3. Create an encrypted room:
    ```
-   >>> /create <room_name> -p <password>
+   >>> /create secure-room -p mypassword123
+   [*] Room 'secure-room' created
    ```
 
-4. Enter the room (another client):
+4. Enter the room (same client or another client):
    ```
-   >>> /enter <room_name>
-   Password: <password>
+   >>> /enter secure-room
+   [*] Password: mypassword123
+   [*] Entered room 'secure-room'
    ```
 
 5. Send encrypted messages:
    ```
    >>> Hello, this message is encrypted!
+   << Alice: Hello, this message is encrypted!
    ```
-   **What the server sees (example)**: ENC:28Oeb/zdl2c4FIbmud/XtpIU78NLWOjXb+ru2ftS05B5DBkR8FHkrdhSGYb0wFLp
-    
 
+6. Leave the room:
+   ```
+   >>> /leave
+   [*] Left Room
+   ```
 
-### Message Flow
+### Client Interface Features
 
-1. **Plaintext Message**: User types a message
-2. **Encryption**: Client encrypts message with room key using AES-256-CTR
-3. **Encoding**: Encrypted data is base64-encoded
-4. **Transmission**: Sent as `ENC:<encoded-data>`
-5. **Server Routing**: Server broadcasts encrypted message to room members
-6. **Reception**: Receiving clients decode and decrypt the message
-7. **Display**: Decrypted message displayed to user
+#### Input Handling
+- Type messages in real-time without pressing Enter to submit each character
+- Use backspace to edit your message before sending
+- Press Enter to send the complete message
+- The prompt `>>>` indicates you're ready to type
+
+#### Color Coding
+- **Green (`>>>`)**: Input prompt
+- **Cyan (`<<`)**: Incoming messages
+- **Yellow (`[*]`)**: System notifications (room entry/exit, status messages)
+- **Red (`[!]`)**: Errors and warnings
+
 
 ## Security Considerations
 
@@ -206,81 +279,18 @@ The client connects to `127.0.0.1` by default. Modify the `IP` variable in `clie
 - Salted password hashing with 10,000 iterations
 - Constant-time password comparison prevents timing attacks
 - Random IV generation for each message
+- Encryption keys never transmitted over the network
+- Password input hidden in terminal
 
 ### Limitations
 - Shared room passwords mean all room members have the same decryption key
-- No forward secrecy - compromised password reveals all past messages
 - No authentication of message origin
-- No key exchange mechanism, the clients have to pre agree on password
+- No key exchange mechanism - clients must pre-agree on password
 - No protection against replay attacks
 - Server can log encrypted messages
 - Metadata (usernames, timestamps, room membership) not protected
+- ngrok traffic is tunneled through third-party servers
 
-## Implementation Notes
-
-### AES Implementation
-The AES encryption functionality is implemented from scratch using OpenSSL's EVP interface for cryptographic operations. The implementation uses AES-256 in CTR (Counter) mode, which provides:
-- Stream cipher-like properties
-- No padding requirements
-- Parallel encryption/decryption capability
-
-### SHA-256 Implementation
-Based on the SHA-256 implementation from Lucidar, with the following modifications:
-- Integration with password hashing system
-- Support for iterative hashing (PBKDF2-like)
-- Constant-time comparison for security
-- Salt generation and verification functions
-
-### Threading Model
-- Server uses one thread per client connection
-- Client uses a separate thread for receiving messages
-- All threads are detached for automatic cleanup
-- Mutex locks protect shared server state
-- Mutex locks are also used for printing to the console in both server and client side.
-
-### Memory Management
-- Dynamic allocation for clients and rooms
-- Proper cleanup on connection termination
-- Zero-out sensitive data after use (passwords, keys)
-
-## Compilation Flags
-
-### Recommended Flags for Production
-```bash
-gcc -Wall -Wextra -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
-    server.c ../Utils/socketUtil.c ../Utils/sha256.c \
-    -o server -lpthread
-```
-
-For the client, add OpenSSL linking:
-```bash
-gcc -Wall -Wextra -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
-    client.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c \
-    -o client -lpthread -lssl -lcrypto
-```
-
-## Known Issues
-
-- Server does not validate maximum message length strictly
-- No rate limiting on connections or messages
-- Room cleanup thread runs every 10 minutes regardless of activity
-- Client does not handle server disconnection gracefully
-- No reconnection logic
-
-## Future Enhancements
-- Implement proper key exchange protocol (Diffie-Hellman)
-- Implement forward secrecy with ephemeral keys
-- Add TLS/SSL for transport layer security
-- Add message timestamps and sequence numbers
-- Add message authentication and integrity verification
-- Support for file transfers
-- Persistent message history (SQL)
-- User authentication system
-- Rate limiting and anti-spam measures
-- IPv6 support
-- Configuration file support
-- Logging system
-- Admin commands for room management
 
 ## License
 
@@ -290,8 +300,20 @@ This project is provided as-is for educational purposes.
 
 - SHA-256 implementation based on work by [Lucidar](https://lucidar.me/en/dev-c-cpp/sha-256-in-c-cpp/)
 - AES implementation using OpenSSL EVP interface
-- C standard library and berkley sockets
+- Socket programming concepts from [STUDevLantern](https://www.youtube.com/@STUDevLantern)
+- C standard library and Berkeley sockets
+- ngrok for secure tunneling
 
 ## Contributing
 
-Contributions are welcome. Please ensure code follows the existing style and includes appropriate error handling.
+Contributions are welcome. Please ensure code follows the existing style and includes appropriate error handling. Key areas for contribution:
+- Security enhancements
+- Performance optimizations
+- Additional features
+- Bug fixes
+- Documentation improvements
+- Test coverage
+
+## Contact
+
+For issues, questions, or suggestions, please open an issue on the project repository.

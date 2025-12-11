@@ -21,4 +21,4 @@ RUN gcc server.c Utils/socketUtil.c Utils/sha256.c -o server
 EXPOSE 8080
 
 # Run the server
-CMD ["./server"
+CMD ["./server"]
