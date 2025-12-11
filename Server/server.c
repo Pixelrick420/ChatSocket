@@ -1,9 +1,9 @@
 #include "../Utils/sha256.h"
 #include "../Utils/socketUtil.h"
 
-char* LOCALHOST              = "0.0.0.0";
-int BACKLOG                  = 10;
-int MAX_CLIENTS              = 32;
+char* LOCALHOST = "0.0.0.0";
+int BACKLOG = 10;
+int MAX_CLIENTS = 32;
 ServerContext* globalContext = NULL;
 
 void handleHelp(Client* client)
@@ -123,7 +123,7 @@ void handleEnter(Client* client, char* buffer)
             pthread_mutex_lock(&globalContext->mutex);
             if (verifyHashedPass(room->password, roomName, inputPass))
             {
-                client->currentRoom                = roomIdx;
+                client->currentRoom = roomIdx;
                 room->members[room->memberCount++] = client->socketFD;
                 snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
             }
@@ -137,7 +137,7 @@ void handleEnter(Client* client, char* buffer)
     }
     else
     {
-        client->currentRoom                = roomIdx;
+        client->currentRoom = roomIdx;
         room->members[room->memberCount++] = client->socketFD;
         snprintf(response, MSG_SIZE, "Entered room '%s'\n", roomName);
         pthread_mutex_unlock(&globalContext->mutex);
@@ -231,8 +231,8 @@ void cleanupClientRoom(Client* client)
 void* handleClient(void* arg)
 {
     Client* client = (Client*) arg;
-    char* buffer   = (char*) malloc(sizeof(char) * MSG_SIZE);
-    bool running   = true;
+    char* buffer = (char*) malloc(sizeof(char) * MSG_SIZE);
+    bool running = true;
 
     while (running)
     {
@@ -241,7 +241,7 @@ void* handleClient(void* arg)
             break;
 
         buffer[received] = 0;
-        CommandType cmd  = parseCommand(buffer);
+        CommandType cmd = parseCommand(buffer);
 
         switch (cmd)
         {
@@ -300,7 +300,7 @@ void* cleanupThread(void* arg)
 
 int main()
 {
-    char* port_env  = getenv("PORT");
+    char* port_env = getenv("PORT");
     int server_port = port_env ? atoi(port_env) : PORT;
 
     int serverSocketFD = createTCPIPv4Socket();

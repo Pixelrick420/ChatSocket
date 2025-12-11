@@ -2,7 +2,7 @@
 #include "../Utils/sha256.h"
 #include "../Utils/socketUtil.h"
 
-char* IP        = "127.0.0.1";
+char* IP = "127.0.0.1";
 int SERVER_PORT = 2077;
 
 RoomEncryption currentEncryption = {0};
@@ -36,7 +36,14 @@ void restoreInputLine()
 {
     pthread_mutex_lock(&inputState.mutex);
 
-    printf(COLOR_GREEN ">>> " COLOR_RESET "%s", inputState.buffer);
+    if (inputState.length > 0)
+    {
+        printf(COLOR_GREEN ">>> " COLOR_RESET "%s", inputState.buffer);
+    }
+    else
+    {
+        printf(COLOR_GREEN ">>> " COLOR_RESET);
+    }
     fflush(stdout);
 
     pthread_mutex_unlock(&inputState.mutex);
@@ -46,8 +53,8 @@ void processIncomingMessage(char* buffer, size_t received)
 {
     char formatted[MSG_SIZE * 2];
 
-    char* colon        = strchr(buffer, ':');
-    char username[64]  = {0};
+    char* colon = strchr(buffer, ':');
+    char username[64] = {0};
     char* messageStart = buffer;
 
     if (colon && colon != buffer)
@@ -57,7 +64,7 @@ void processIncomingMessage(char* buffer, size_t received)
         {
             memcpy(username, buffer, usernameLen);
             username[usernameLen] = '\0';
-            messageStart          = colon + 2;
+            messageStart = colon + 2;
         }
     }
 
@@ -117,7 +124,7 @@ void processIncomingMessage(char* buffer, size_t received)
     {
         snprintf(formatted, sizeof(formatted), "%s[*] %s%s\n", COLOR_YELLOW, buffer, COLOR_RESET);
         print(formatted);
-
+        restoreInputLine();
         return;
     }
     else
@@ -235,13 +242,13 @@ int main(int argc, char* argv[])
     if (argc > 1)
     {
         char* address = argv[1];
-        char* colon   = strchr(address, ':');
+        char* colon = strchr(address, ':');
 
         if (colon)
         {
 
-            *colon      = '\0';
-            IP          = address;
+            *colon = '\0';
+            IP = address;
             SERVER_PORT = atoi(colon + 1);
         }
         else
@@ -264,7 +271,7 @@ int main(int argc, char* argv[])
     snprintf(port_str, sizeof(port_str), "%d", SERVER_PORT);
 
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     int rv = getaddrinfo(IP, port_str, &hints, &servinfo);
@@ -313,8 +320,8 @@ int main(int argc, char* argv[])
     }
     pthread_detach(pid);
 
-    char* message         = NULL;
-    size_t msgSize        = 0;
+    char* message = NULL;
+    size_t msgSize = 0;
     bool awaitingPassword = false;
 
     clearScreen();
@@ -375,7 +382,7 @@ int main(int argc, char* argv[])
 
             pthread_mutex_lock(&inputState.mutex);
             inputState.buffer[0] = '\0';
-            inputState.length    = 0;
+            inputState.length = 0;
             pthread_mutex_unlock(&inputState.mutex);
 
             continue;
@@ -394,7 +401,7 @@ int main(int argc, char* argv[])
 
             pthread_mutex_lock(&inputState.mutex);
             inputState.buffer[0] = '\0';
-            inputState.length    = 0;
+            inputState.length = 0;
             pthread_mutex_unlock(&inputState.mutex);
 
             continue;
@@ -406,7 +413,7 @@ int main(int argc, char* argv[])
 
             pthread_mutex_lock(&inputState.mutex);
             inputState.buffer[0] = '\0';
-            inputState.length    = 0;
+            inputState.length = 0;
             pthread_mutex_unlock(&inputState.mutex);
 
             continue;
@@ -425,7 +432,7 @@ int main(int argc, char* argv[])
 
             pthread_mutex_lock(&inputState.mutex);
             inputState.buffer[0] = '\0';
-            inputState.length    = 0;
+            inputState.length = 0;
             pthread_mutex_unlock(&inputState.mutex);
 
             continue;
@@ -439,7 +446,7 @@ int main(int argc, char* argv[])
 
             pthread_mutex_lock(&inputState.mutex);
             inputState.buffer[0] = '\0';
-            inputState.length    = 0;
+            inputState.length = 0;
             pthread_mutex_unlock(&inputState.mutex);
 
             continue;
@@ -474,7 +481,7 @@ int main(int argc, char* argv[])
 
         pthread_mutex_lock(&inputState.mutex);
         inputState.buffer[0] = '\0';
-        inputState.length    = 0;
+        inputState.length = 0;
         pthread_mutex_unlock(&inputState.mutex);
     }
 
