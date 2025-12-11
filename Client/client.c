@@ -1,10 +1,6 @@
 #include "../Utils/aes.h"
 #include "../Utils/sha256.h"
 #include "../Utils/socketUtil.h"
-#include <arpa/inet.h>
-#include <errno.h>
-#include <netdb.h>
-#include <signal.h>
 
 char* IP        = "127.0.0.1";
 int SERVER_PORT = 2077;
@@ -235,6 +231,7 @@ bool sendToServer(int socketFD, const char* message)
 
 int main(int argc, char* argv[])
 {
+
     if (argc > 1)
     {
         char* address = argv[1];
@@ -262,17 +259,30 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    struct hostent* host = gethostbyname(IP);
-    char* resolved_ip    = IP;
+    struct addrinfo hints, *servinfo;
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", SERVER_PORT);
 
-    if (host != NULL && host->h_addr_list[0] != NULL)
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int rv = getaddrinfo(IP, port_str, &hints, &servinfo);
+    if (rv != 0)
     {
-        struct in_addr addr;
-        memcpy(&addr, host->h_addr_list[0], sizeof(struct in_addr));
-        resolved_ip = inet_ntoa(addr);
+        print(COLOR_RED "[!] Failed to resolve hostname: " COLOR_RESET);
+        printf("%s\n", gai_strerror(rv));
+        close(socketFD);
+        return 1;
     }
 
+    char resolved_ip[INET_ADDRSTRLEN];
+    struct sockaddr_in* ipv4 = (struct sockaddr_in*) servinfo->ai_addr;
+    inet_ntop(AF_INET, &(ipv4->sin_addr), resolved_ip, INET_ADDRSTRLEN);
+
     SocketAddress* address = getSocketAddress(resolved_ip, SERVER_PORT, true);
+
+    freeaddrinfo(servinfo);
 
     if (!address)
     {
