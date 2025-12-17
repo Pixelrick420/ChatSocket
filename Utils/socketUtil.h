@@ -1,6 +1,7 @@
 #ifndef SOCKETUTIL_H
 #define SOCKETUTIL_H
 
+// dependencies
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -8,6 +9,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,13 +20,23 @@
 #include <time.h>
 #include <unistd.h>
 
+// constants
 #define MSG_SIZE 2048
 #define PORT 2077
+#define MAX_NAME_LEN 64
+#define MAX_PASSWORD_LEN 128
+#define MAX_ROOM_MEMBERS 32
+#define ROOM_TIMEOUT 3600
+
+// colors for printing
 #define COLOR_RESET "\033[0m"
 #define COLOR_GREEN "\033[1;32m"
 #define COLOR_CYAN "\033[1;36m"
 #define COLOR_RED "\033[1;31m"
 #define COLOR_YELLOW "\033[1;33m"
+
+// enums and structs
+typedef struct sockaddr_in SocketAddress;
 
 typedef enum
 {
@@ -38,11 +50,10 @@ typedef enum
     CMD_UNKNOWN
 } CommandType;
 
-typedef struct sockaddr_in SocketAddress;
-typedef struct Room
+typedef struct
 {
-    char name[64];
-    char password[128];
+    char name[MAX_NAME_LEN];
+    char password[MAX_PASSWORD_LEN];
     bool hasPassword;
     int* members;
     int memberCount;
@@ -54,38 +65,52 @@ typedef struct
 {
     int socketFD;
     SocketAddress* address;
-    int error;
-    bool success;
-    char name[64];
+    char name[MAX_NAME_LEN];
     int currentRoom;
+    bool success;
+    int error;
 } Client;
 
 typedef struct
 {
     int socketFD;
-    pthread_mutex_t mutex;
     Client** clients;
     size_t clientCount;
-    int size;
+    int maxClients;
     Room** rooms;
     int roomCount;
     int maxRooms;
+    pthread_mutex_t mutex;
 } ServerContext;
 
+// print with mutex lock
 void print(char* message);
-int createTCPIPv4Socket();
-SocketAddress* getSocketAddress(char* ipAddr, int port, bool isClient);
-int connectToSocket(int socketFD, SocketAddress* address, int size);
-int bindServerToSocket(int socketFD, SocketAddress* address, int size);
-Client* createClient(int socketFD, SocketAddress* clientAddr);
-void recieveMessages(int socketFD);
-ServerContext* createContext(int socketFD, int size);
-void cleanupServer(ServerContext* context);
-int addClient(ServerContext* context, Client* client);
+
+// socket management
+int createTCPSocket(void);
+SocketAddress* createSocketAddress(char* ipAddr, int port, bool isClient);
+int connectSocket(int socketFD, SocketAddress* address);
+int bindSocket(int socketFD, SocketAddress* address);
+Client* acceptClient(int serverSocketFD);
+
+// server management
+ServerContext* createServerContext(int socketFD, int maxClients, int maxRooms);
+void destroyServerContext(ServerContext* context);
+
+// client management
+bool addClient(ServerContext* context, Client* client);
 void removeClient(ServerContext* context, int socketFD);
-void broadcastMessage(ServerContext* context, int senderFD, const char* msg, size_t len);
-int findRoom(ServerContext* context, const char* name);
+
+// room management
 Room* createRoom(const char* name, const char* password);
+void destroyRoom(Room* room);
+int findRoomIndex(ServerContext* context, const char* name);
+bool addMemberToRoom(Room* room, int socketFD);
+bool removeMemberFromRoom(Room* room, int socketFD);
+void updateRoomActivity(Room* room);
 void cleanupInactiveRooms(ServerContext* context);
-void broadcastToRoom(ServerContext* context, int roomIdx, int senderFD, const char* msg, size_t len);
+
+// message broadcast
+void broadcastToRoom(ServerContext* context, int roomIdx, int senderFD, const char* msg);
+
 #endif
