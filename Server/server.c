@@ -286,6 +286,7 @@ static void* handleClient(void* arg)
     while (running)
     {
         ssize_t received = recv(client->socketFD, buffer, MSG_SIZE - 1, 0);
+        int index = received;
 
         if (received <= 0)
             break;

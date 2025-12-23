@@ -18,6 +18,7 @@ typedef struct
 } InputState;
 
 static InputState g_input = {.buffer = {0}, .length = 0, .mutex = PTHREAD_MUTEX_INITIALIZER, .connected = true};
+static bool sendToServer(const char* message);
 
 static void disableRawMode(void)
 {
@@ -61,7 +62,7 @@ static void showInputLine(void)
 static void printMessage(const char* color, const char* prefix, const char* message)
 {
     char formatted[MSG_SIZE * 2];
-    snprintf(formatted, sizeof(formatted), "%s%s%s%s\n", color, prefix, message, COLOR_RESET);
+    snprintf(formatted, sizeof(formatted), "%s%s%s%s", color, prefix, message, COLOR_RESET);
     print(formatted);
 }
 
@@ -122,7 +123,7 @@ static void displayIncomingMessage(char* buffer)
             showInputLine();
             return;
         }
-        printMessage(COLOR_RED, "[!] ", "Failed to decrypt message");
+        printMessage(COLOR_RED, "[!] ", "Failed to decrypt message\n");
         showInputLine();
         return;
     }
@@ -141,12 +142,51 @@ static void displayIncomingMessage(char* buffer)
     else if (buffer[0] == 'P' && buffer[1] == 'A' && buffer[2] == 'S')
     {
         printMessage(COLOR_YELLOW, "[*] ", buffer + 3);
+        char password[MAX_NAME_LEN];
+        printMessage(COLOR_GREEN, ">>> ", "");
+        fflush(stdout);
+
+        size_t passLen = 0;
+        while (passLen < MAX_NAME_LEN - 1)
+        {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) != 1)
+                continue;
+
+            if (c == '\n' || c == '\r')
+                break;
+
+            if (c == 127 || c == 8)
+            {
+                if (passLen > 0)
+                {
+                    passLen--;
+                    printf("\b \b");
+                    fflush(stdout);
+                }
+            }
+            else if (isprint(c))
+            {
+                password[passLen++] = c;
+                printf("%c", c);
+                fflush(stdout);
+            }
+        }
+        password[passLen] = '\0';
+        printf("\n");
+        deriveKeyFromPassword(password, g_encryption.key);
+        g_encryption.hasKey = true;
+
+        char toSend[MSG_SIZE];
+        snprintf(toSend, MSG_SIZE, "%s\n", password);
+        sendToServer(toSend);
+
         showInputLine();
         return;
     }
     else
     {
-        printMessage(COLOR_RED, "[!] ", "Invalid message type Recieved from Server");
+        printMessage(COLOR_RED, "[!] ", "Invalid message type Recieved from Server\n");
         printMessage(COLOR_GREEN, "recieved: ", buffer);
     }
 
@@ -160,8 +200,8 @@ static void handleDisconnect(void)
     pthread_mutex_unlock(&g_input.mutex);
 
     clearInputLine();
-    printMessage(COLOR_RED, "\n[!] ", "Disconnected from server");
-    printMessage(COLOR_YELLOW, "[*] ", "Connection lost. Press Enter to exit.");
+    printMessage(COLOR_RED, "\n[!] ", "Disconnected from server\n");
+    printMessage(COLOR_YELLOW, "[*] ", "Connection lost. Press Enter to exit.\n");
     fflush(stdout);
 
     close(g_socketFD);
@@ -174,24 +214,20 @@ static void* receiveThread(void* arg)
     while (true)
     {
         ssize_t received = recv(g_socketFD, buffer, MSG_SIZE - 1, 0);
-
-        if (received > 0)
+        if (received <= 0)
         {
-            buffer[received] = '\0';
-            displayIncomingMessage(buffer);
+            handleDisconnect();
+            break;
         }
-        else if (received == 0)
+        else if (errno == ECONNRESET || errno == EPIPE)
         {
             handleDisconnect();
             break;
         }
         else
         {
-            if (errno == ECONNRESET || errno == EPIPE)
-            {
-                handleDisconnect();
-            }
-            break;
+            buffer[received] = '\0';
+            displayIncomingMessage(buffer);
         }
     }
 
@@ -206,11 +242,18 @@ static bool sendToServer(const char* message)
 
     if (!connected)
     {
-        printMessage(COLOR_RED, "[!] ", "Cannot send: Not connected to server");
+        printMessage(COLOR_RED, "[!] ", "Cannot send: Not connected to server\n");
         return false;
     }
 
-    ssize_t sent = send(g_socketFD, message, strlen(message), 0);
+    int length = strlen(message) + 1;
+    if (length >= MSG_SIZE)
+    {
+        printMessage(COLOR_RED, "[!] ", "Failed to send message: Message too long\n");
+        return false;
+    }
+
+    ssize_t sent = send(g_socketFD, message, length, 0);
 
     if (sent < 0)
     {
@@ -220,7 +263,7 @@ static bool sendToServer(const char* message)
         }
         else
         {
-            printMessage(COLOR_RED, "[!] ", "Failed to send message: Connection error");
+            printMessage(COLOR_RED, "[!] ", "Failed to send message: Connection error\n");
         }
         return false;
     }
@@ -246,7 +289,7 @@ static bool encryptAndSend(const char* message, size_t msgLen)
 
     if (ciphertextLen <= 0)
     {
-        printMessage(COLOR_RED, "[!] ", "Failed to encrypt message");
+        printMessage(COLOR_RED, "[!] ", "Failed to encrypt message\n");
         return false;
     }
 
@@ -259,22 +302,10 @@ static bool encryptAndSend(const char* message, size_t msgLen)
     return sendToServer(toSend);
 }
 
-static bool processInput(char* message, size_t msgLen, bool* awaitingPassword)
+static bool processInput(char* message, size_t msgLen)
 {
     if (msgLen == 0)
         return true;
-
-    if (*awaitingPassword && message[0] != '/')
-    {
-        *awaitingPassword = false;
-        deriveKeyFromPassword(message, g_encryption.key);
-        g_encryption.hasKey = true;
-
-        char toSend[MSG_SIZE];
-        snprintf(toSend, MSG_SIZE, "%s\n", message);
-        sendToServer(toSend);
-        return true;
-    }
 
     if (strcmp(message, "/exit") == 0)
     {
@@ -300,7 +331,6 @@ static bool processInput(char* message, size_t msgLen, bool* awaitingPassword)
         char roomName[64] = {0};
         sscanf(message + 7, "%63s", roomName);
         strncpy(g_encryption.roomName, roomName, sizeof(g_encryption.roomName) - 1);
-        *awaitingPassword = true;
 
         char toSend[MSG_SIZE];
         snprintf(toSend, MSG_SIZE, "%s\n", message);
@@ -349,7 +379,6 @@ static void clearInputBuffer(void)
 
 static void inputLoop(void)
 {
-    bool awaitingPassword = false;
     char message[MSG_SIZE] = {0};
     size_t msgLen = 0;
 
@@ -375,7 +404,7 @@ static void inputLoop(void)
             message[msgLen] = '\0';
             printf("\n");
 
-            if (!processInput(message, msgLen, &awaitingPassword))
+            if (!processInput(message, msgLen))
             {
                 break;
             }
@@ -416,7 +445,7 @@ static bool connectToServer(const char* ip, int port)
     g_socketFD = createTCPSocket();
     if (g_socketFD < 0)
     {
-        printMessage(COLOR_RED, "[!] ", "Failed to create socket");
+        printMessage(COLOR_RED, "[!] ", "Failed to create socket\n");
         return false;
     }
 
@@ -430,7 +459,7 @@ static bool connectToServer(const char* ip, int port)
 
     if (getaddrinfo(ip, portStr, &hints, &servinfo) != 0)
     {
-        printMessage(COLOR_RED, "[!] ", "Failed to resolve hostname");
+        printMessage(COLOR_RED, "[!] ", "Failed to resolve hostname\n");
         close(g_socketFD);
         return false;
     }
@@ -444,7 +473,7 @@ static bool connectToServer(const char* ip, int port)
 
     if (!address)
     {
-        printMessage(COLOR_RED, "[!] ", "Failed to get socket address");
+        printMessage(COLOR_RED, "[!] ", "Failed to get socket address\n");
         close(g_socketFD);
         return false;
     }
@@ -452,7 +481,7 @@ static bool connectToServer(const char* ip, int port)
     if (connectSocket(g_socketFD, address) != 0)
     {
         printf(COLOR_RED "[!] Failed to connect to server at " COLOR_RESET "%s:%d\n", ip, port);
-        printMessage(COLOR_YELLOW, "[*] ", "Please check if the server is running and the address is correct");
+        printMessage(COLOR_YELLOW, "[*] ", "Please check if the server is running and the address is correct\n");
         close(g_socketFD);
         free(address);
         return false;
@@ -492,7 +521,7 @@ int main(int argc, char* argv[])
     pthread_t recvTid;
     if (pthread_create(&recvTid, NULL, receiveThread, NULL) != 0)
     {
-        printMessage(COLOR_RED, "[!] ", "Failed to create receive thread");
+        printMessage(COLOR_RED, "[!] ", "Failed to create receive thread\n");
         close(g_socketFD);
         return 1;
     }
@@ -507,7 +536,7 @@ int main(int argc, char* argv[])
     inputLoop();
     disableRawMode();
 
-    printMessage(COLOR_YELLOW, "\n[*] ", "Shutting down...");
+    printMessage(COLOR_YELLOW, "\n[*] ", "Shutting down...\n");
     close(g_socketFD);
     pthread_mutex_destroy(&g_input.mutex);
 
