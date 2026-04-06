@@ -1,10 +1,65 @@
+#include "../Utils/identity.h"
 #include "../Utils/sha256.h"
 #include "../Utils/socketUtil.h"
+
+#include <openssl/rand.h>
 
 #define LOCALHOST "0.0.0.0"
 #define BACKLOG 10
 #define MAX_CLIENTS 32
 #define MAX_ROOMS 50
+#define TOKEN_HEX_LEN 64
+
+typedef struct {
+  char token[TOKEN_HEX_LEN + 1];
+  int socketFD;
+} TokenEntry;
+
+static TokenEntry g_tokenMap[MAX_CLIENTS];
+static int g_tokenCount = 0;
+
+static int tokenMapSet(const char *token, int newFD) {
+  for (int i = 0; i < g_tokenCount; i++) {
+    if (strcmp(g_tokenMap[i].token, token) == 0) {
+
+      return -1;
+    }
+  }
+  if (g_tokenCount < MAX_CLIENTS) {
+    snprintf(g_tokenMap[g_tokenCount].token,
+             sizeof(g_tokenMap[g_tokenCount].token), "%s", token);
+    g_tokenMap[g_tokenCount].socketFD = newFD;
+    g_tokenCount++;
+  }
+  return 0;
+}
+
+static int tokenMapLookup(const char *token) {
+  for (int i = 0; i < g_tokenCount; i++) {
+    if (strcmp(g_tokenMap[i].token, token) == 0)
+      return g_tokenMap[i].socketFD;
+  }
+  return -1;
+}
+
+static void tokenMapRemoveByFD(int fd) {
+  for (int i = 0; i < g_tokenCount; i++) {
+    if (g_tokenMap[i].socketFD == fd) {
+      g_tokenMap[i] = g_tokenMap[--g_tokenCount];
+      return;
+    }
+  }
+}
+
+static bool tokenMapLookupByFD(int fd, char out[TOKEN_HEX_LEN + 1]) {
+  for (int i = 0; i < g_tokenCount; i++) {
+    if (g_tokenMap[i].socketFD == fd) {
+      memcpy(out, g_tokenMap[i].token, TOKEN_HEX_LEN + 1);
+      return true;
+    }
+  }
+  return false;
+}
 
 static ServerContext *g_context = NULL;
 
@@ -25,7 +80,26 @@ static bool isBlankString(const char *str) {
   return true;
 }
 
+typedef enum {
+  CMD_MESSAGE,
+  CMD_HELP,
+  CMD_NAME,
+  CMD_CREATE,
+  CMD_ENTER,
+  CMD_LEAVE,
+  CMD_EXIT,
+  CMD_AUTH,
+  CMD_DM,
+  CMD_DM_REQ,
+  CMD_ROOMS,
+  CMD_UNKNOWN
+} CommandType;
+
 static CommandType parseCommand(const char *buffer) {
+  if (strncmp(buffer, "AUTH:", 5) == 0)
+    return CMD_AUTH;
+  if (strncmp(buffer, "DM:", 3) == 0)
+    return CMD_DM;
   if (buffer[0] != '/')
     return CMD_MESSAGE;
   if (strncmp(buffer, "/help", 5) == 0)
@@ -40,6 +114,8 @@ static CommandType parseCommand(const char *buffer) {
     return CMD_LEAVE;
   if (strncmp(buffer, "/exit", 5) == 0)
     return CMD_EXIT;
+  if (strncmp(buffer, "/rooms", 6) == 0)
+    return CMD_ROOMS;
   return CMD_UNKNOWN;
 }
 
@@ -54,16 +130,21 @@ static void leaveCurrentRoom(Client *client) {
 }
 
 static void cmdHelp(Client *client) {
-  sendResponse(client->socketFD,
-               "RESAvailable Commands:\n"
-               "  /help                              – Show this help\n"
-               "  /name <name>                       – Set your display name\n"
-               "  /create <room>                     – Create a public room\n"
-               "  /create <room> -p <password>       – Create a "
-               "password-protected room\n"
-               "  /enter <room>                      – Enter a room\n"
-               "  /leave                             – Leave the current room\n"
-               "  /exit                              – Disconnect\n");
+  sendResponse(
+      client->socketFD,
+      "RESAvailable Commands:\n"
+      "  /help                              – Show this help\n"
+      "  /token                             – Show your identity token\n"
+      "  /name <name>                       – Set your display name\n"
+      "  /rooms                             – List available rooms\n"
+      "  /create <room>                     – Create a public room\n"
+      "  /create <room> -p <password>       – Create a password-protected "
+      "room\n"
+      "  /enter <room>                      – Enter a room\n"
+      "  /leave                             – Leave the current room\n"
+      "  /list                              – List your DM conversations\n"
+      "  /dm <token>                        – Start a private DM session\n"
+      "  /exit                              – Disconnect\n");
 }
 
 static void cmdSetName(Client *client, const char *buffer) {
@@ -75,10 +156,21 @@ static void cmdSetName(Client *client, const char *buffer) {
     return;
   }
 
-  strncpy(client->name, newName, MAX_NAME_LEN - 1);
-  client->name[MAX_NAME_LEN - 1] = '\0';
+  char oldName[MAX_NAME_LEN];
+  snprintf(oldName, sizeof(oldName), "%s", client->name);
+
+  snprintf(client->name, MAX_NAME_LEN, "%s", newName);
+
   snprintf(response, sizeof(response), "RESName set to: %s\n", client->name);
   sendResponse(client->socketFD, response);
+
+  if (client->currentRoom != -1) {
+    char announcement[MSG_SIZE];
+    snprintf(announcement, sizeof(announcement), "RES%s is now known as %s\n",
+             oldName, client->name);
+    broadcastToRoom(g_context, client->currentRoom, client->socketFD,
+                    announcement);
+  }
 }
 
 static void cmdCreateRoom(Client *client, char *buffer) {
@@ -109,7 +201,6 @@ static void cmdCreateRoom(Client *client, char *buffer) {
 
   Room *room;
   if (!isBlankString(password) && strlen(password) > 0) {
-
     char *hashedPass = createHashedPass(roomName, password);
     if (!hashedPass) {
       pthread_mutex_unlock(&g_context->mutex);
@@ -245,8 +336,7 @@ static void cmdSendMessage(Client *client, const char *buffer) {
   }
 
   char text[MSG_SIZE];
-  strncpy(text, buffer, MSG_SIZE - 1);
-  text[MSG_SIZE - 1] = '\0';
+  snprintf(text, sizeof(text), "%s", buffer);
   trimNewlines(text);
 
   char message[MSG_SIZE];
@@ -254,9 +344,194 @@ static void cmdSendMessage(Client *client, const char *buffer) {
   broadcastToRoom(g_context, client->currentRoom, client->socketFD, message);
 }
 
+static bool cmdAuth(Client *client, const char *buffer,
+                    const unsigned char nonce[CHALLENGE_BYTES]) {
+
+  const char *p = buffer + 5;
+
+  if (strlen(p) < (size_t)(TOKEN_HEX_LEN + 1 + SIG_HEX_LEN)) {
+    sendResponse(client->socketFD, "ERRMalformed AUTH frame\n");
+    return false;
+  }
+
+  char token[TOKEN_STR_SIZE];
+  snprintf(token, sizeof(token), "%.*s", TOKEN_HEX_LEN, p);
+
+  for (int i = 0; i < TOKEN_HEX_LEN; i++) {
+    char c = token[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F'))) {
+      sendResponse(client->socketFD, "ERRToken contains invalid characters\n");
+      return false;
+    }
+  }
+
+  if (p[TOKEN_HEX_LEN] != ':') {
+    sendResponse(client->socketFD, "ERRMalformed AUTH frame\n");
+    return false;
+  }
+
+  const char *sigHex = p + TOKEN_HEX_LEN + 1;
+  unsigned char sig[SIG_BYTES];
+  for (int i = 0; i < SIG_BYTES; i++) {
+    int hi, lo;
+    char hc = sigHex[i * 2], lc = sigHex[i * 2 + 1];
+    if (hc >= '0' && hc <= '9')
+      hi = hc - '0';
+    else if (hc >= 'a' && hc <= 'f')
+      hi = hc - 'a' + 10;
+    else if (hc >= 'A' && hc <= 'F')
+      hi = hc - 'A' + 10;
+    else {
+      sendResponse(client->socketFD, "ERRBad signature encoding\n");
+      return false;
+    }
+    if (lc >= '0' && lc <= '9')
+      lo = lc - '0';
+    else if (lc >= 'a' && lc <= 'f')
+      lo = lc - 'a' + 10;
+    else if (lc >= 'A' && lc <= 'F')
+      lo = lc - 'A' + 10;
+    else {
+      sendResponse(client->socketFD, "ERRBad signature encoding\n");
+      return false;
+    }
+    sig[i] = (unsigned char)((hi << 4) | lo);
+  }
+
+  if (!identityVerify(token, nonce, CHALLENGE_BYTES, sig)) {
+    sendResponse(client->socketFD,
+                 "ERRAuthentication failed: invalid signature\n");
+    return false;
+  }
+
+  pthread_mutex_lock(&g_context->mutex);
+  int rc = tokenMapSet(token, client->socketFD);
+  pthread_mutex_unlock(&g_context->mutex);
+
+  if (rc != 0) {
+    sendResponse(client->socketFD,
+                 "ERRAlready connected: this identity has an active session\n");
+    return false;
+  }
+
+  sendResponse(client->socketFD, "RESAuthenticated\n");
+  return true;
+}
+
+static void cmdRouteDirectMessage(Client *client, const char *buffer) {
+
+  const char *p = buffer + 3;
+  if (strlen(p) < TOKEN_HEX_LEN + 1) {
+    sendResponse(client->socketFD, "ERRMalformed DM command\n");
+    return;
+  }
+
+  char targetToken[TOKEN_HEX_LEN + 1];
+  memcpy(targetToken, p, TOKEN_HEX_LEN);
+  targetToken[TOKEN_HEX_LEN] = '\0';
+
+  char senderToken[TOKEN_HEX_LEN + 1] = {0};
+  pthread_mutex_lock(&g_context->mutex);
+  bool hasSenderToken = tokenMapLookupByFD(client->socketFD, senderToken);
+  int targetFD = tokenMapLookup(targetToken);
+  pthread_mutex_unlock(&g_context->mutex);
+
+  if (!hasSenderToken) {
+    sendResponse(client->socketFD,
+                 "ERRMust register token before sending DMs\n");
+    return;
+  }
+
+  if (strcmp(senderToken, targetToken) == 0) {
+    sendResponse(client->socketFD, "RESCannot DM yourself\n");
+    return;
+  }
+
+  if (targetFD < 0) {
+    sendResponse(client->socketFD, "RESReceiver not connected\n");
+    return;
+  }
+
+  const char *payload = p + TOKEN_HEX_LEN + 1;
+
+  char forwarded[MSG_SIZE * 2];
+  int fwdLen =
+      snprintf(forwarded, sizeof(forwarded), "DM:%s:%s", senderToken, payload);
+
+  if (fwdLen > 0 && forwarded[fwdLen - 1] != '\n') {
+    if (fwdLen < (int)sizeof(forwarded) - 1) {
+      forwarded[fwdLen++] = '\n';
+      forwarded[fwdLen] = '\0';
+    }
+  }
+
+  send(targetFD, forwarded, (size_t)fwdLen, 0);
+}
+
+static void cmdListRooms(Client *client) {
+  pthread_mutex_lock(&g_context->mutex);
+
+  if (g_context->roomCount == 0) {
+    pthread_mutex_unlock(&g_context->mutex);
+    sendResponse(client->socketFD, "RESNo rooms available\n");
+    return;
+  }
+
+  char response[MSG_SIZE];
+  int offset = 0;
+  offset += snprintf(response + offset, sizeof(response) - offset,
+                     "RESAvailable rooms:\n");
+
+  for (int i = 0;
+       i < g_context->roomCount && offset < (int)sizeof(response) - 60; i++) {
+    Room *r = g_context->rooms[i];
+    offset +=
+        snprintf(response + offset, sizeof(response) - offset, "  %-20s %s\n",
+                 r->name, r->hasPassword ? "[password protected]" : "[open]");
+  }
+
+  pthread_mutex_unlock(&g_context->mutex);
+  sendResponse(client->socketFD, response);
+}
+
 static void *handleClient(void *arg) {
   Client *client = (Client *)arg;
   char buffer[MSG_SIZE];
+
+  unsigned char nonce[CHALLENGE_BYTES];
+  if (RAND_bytes(nonce, CHALLENGE_BYTES) != 1) {
+    sendResponse(client->socketFD,
+                 "ERRServer error: could not generate nonce\n");
+    goto disconnect;
+  }
+
+  {
+    static const char hexChars[] = "0123456789abcdef";
+    char challengeMsg[10 + CHALLENGE_HEX_LEN + 2];
+    challengeMsg[0] = '\0';
+    char *out = challengeMsg;
+    out += snprintf(out, sizeof(challengeMsg), "CHALLENGE:");
+    for (int i = 0; i < CHALLENGE_BYTES; i++) {
+      *out++ = hexChars[nonce[i] >> 4];
+      *out++ = hexChars[nonce[i] & 0x0f];
+    }
+    *out++ = '\n';
+    *out = '\0';
+    sendResponse(client->socketFD, challengeMsg);
+  }
+
+  {
+    ssize_t received = recv(client->socketFD, buffer, MSG_SIZE - 1, 0);
+    if (received <= 0)
+      goto disconnect;
+    buffer[received] = '\0';
+
+    if (parseCommand(buffer) != CMD_AUTH || !cmdAuth(client, buffer, nonce)) {
+
+      goto disconnect;
+    }
+  }
 
   while (true) {
     ssize_t received = recv(client->socketFD, buffer, MSG_SIZE - 1, 0);
@@ -286,6 +561,17 @@ static void *handleClient(void *arg) {
     case CMD_MESSAGE:
       cmdSendMessage(client, buffer);
       break;
+    case CMD_AUTH:
+
+      sendResponse(client->socketFD, "ERRAlready authenticated\n");
+      break;
+    case CMD_DM:
+    case CMD_DM_REQ:
+      cmdRouteDirectMessage(client, buffer);
+      break;
+    case CMD_ROOMS:
+      cmdListRooms(client);
+      break;
     case CMD_UNKNOWN:
       sendResponse(client->socketFD,
                    "RESUnknown command — type /help for help\n");
@@ -295,6 +581,9 @@ static void *handleClient(void *arg) {
 
 disconnect:
   leaveCurrentRoom(client);
+  pthread_mutex_lock(&g_context->mutex);
+  tokenMapRemoveByFD(client->socketFD);
+  pthread_mutex_unlock(&g_context->mutex);
   removeClient(g_context, client->socketFD);
   close(client->socketFD);
   free(client->address);
@@ -312,7 +601,6 @@ static void *cleanupThread(void *arg) {
 }
 
 int main(void) {
-
   const char *portEnv = getenv("PORT");
   int serverPort = portEnv ? atoi(portEnv) : PORT;
 
@@ -345,7 +633,10 @@ int main(void) {
   g_context = createServerContext(serverSocketFD, MAX_CLIENTS, MAX_ROOMS);
 
   pthread_t cleanupTid;
-  pthread_create(&cleanupTid, NULL, cleanupThread, NULL);
+  if (pthread_create(&cleanupTid, NULL, cleanupThread, NULL) != 0) {
+    perror("pthread_create (cleanup thread)");
+    return 1;
+  }
   pthread_detach(cleanupTid);
 
   while (true) {

@@ -9,8 +9,9 @@ echo "Compiling server..."
 gcc server.c \
     ../Utils/socketUtil.c \
     ../Utils/sha256.c \
+    ../Utils/identity.c \
     -o server \
-    -lpthread \
+    -lpthread -lssl -lcrypto \
     -Wall -Wextra -O2
 
 echo "Compiled successfully."

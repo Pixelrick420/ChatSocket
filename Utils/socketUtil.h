@@ -1,3 +1,4 @@
+#pragma once
 #ifndef SOCKETUTIL_H
 #define SOCKETUTIL_H
 
@@ -34,17 +35,6 @@
 
 
 typedef struct sockaddr_in SocketAddress;
-typedef enum
-{
-    CMD_HELP,
-    CMD_NAME,
-    CMD_CREATE,
-    CMD_ENTER,
-    CMD_LEAVE,
-    CMD_EXIT,
-    CMD_MESSAGE,
-    CMD_UNKNOWN
-} CommandType;
 typedef struct
 {
     char   name[MAX_NAME_LEN];
