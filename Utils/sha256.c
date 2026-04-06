@@ -1,7 +1,4 @@
 #include "sha256.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 static inline uint32_t rotr(uint32_t x, int n) {
   return (x >> n) | (x << (32 - n));
@@ -268,6 +265,52 @@ int verifyHashedPass(const char *stored, const char *roomName,
 
   memset(buf, 0, buf_len);
   memset(inner_hex, 0, sizeof(inner_hex));
+  memset(computed_hex, 0, sizeof(computed_hex));
+  free(buf);
+
+  return ok;
+}
+
+int verifyHashedPassPrehashed(const char *stored, const char *roomName,
+                              const char *passwordSha256Hex) {
+
+  if (!passwordSha256Hex || strlen(passwordSha256Hex) != SHA256_HEX_SIZE - 1)
+    return 0;
+
+  const char *sep = strchr(stored, ':');
+  if (!sep)
+    return 0;
+
+  size_t salt_hex_len = (size_t)(sep - stored);
+  if (salt_hex_len != SALT_LEN * 2)
+    return 0;
+
+  char salt_hex[SALT_HEX_SIZE];
+  memcpy(salt_hex, stored, salt_hex_len);
+  salt_hex[salt_hex_len] = '\0';
+
+  const char *stored_hash = sep + 1;
+  if (strlen(stored_hash) != SHA256_HEX_SIZE - 1)
+    return 0;
+
+  size_t buf_len =
+      strlen(salt_hex) + 1 + strlen(roomName) + 1 + (SHA256_HEX_SIZE - 1) + 1;
+  char *buf = malloc(buf_len);
+  if (!buf)
+    return 0;
+  snprintf(buf, buf_len, "%s:%s:%s", salt_hex, roomName, passwordSha256Hex);
+
+  char computed_hex[SHA256_HEX_SIZE];
+  sha256Hex(buf, strlen(buf), computed_hex);
+  for (int i = 1; i < HASH_ITERATIONS; i++) {
+    char tmp[SHA256_HEX_SIZE];
+    memcpy(tmp, computed_hex, SHA256_HEX_SIZE);
+    sha256Hex(tmp, SHA256_HEX_SIZE - 1, computed_hex);
+  }
+
+  int ok = constTimeEq(computed_hex, stored_hash, SHA256_HEX_SIZE - 1);
+
+  memset(buf, 0, buf_len);
   memset(computed_hex, 0, sizeof(computed_hex));
   free(buf);
 

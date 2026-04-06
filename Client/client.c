@@ -3,12 +3,15 @@
 #include "../Utils/history.h"
 #include "../Utils/identity.h"
 #include "../Utils/socketUtil.h"
+#include "../Utils/tls.h"
 
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 2077
 
 static int g_socketFD = -1;
+static SSL *g_ssl = NULL;
 static Identity g_identity = {0};
+
 static RoomEncryption g_encryption = {0};
 
 typedef struct {
@@ -177,22 +180,14 @@ static void handleIncomingDm(const char *frame) {
     char trimmed[TOKEN_STR_SIZE];
     snprintf(trimmed, sizeof(trimmed), "%.*s", TOKEN_HEX_LEN, peerPubHex);
 
-    unsigned char peerPubX25519[32];
-    if (!tokenToX25519PublicKey(trimmed, peerPubX25519)) {
+    unsigned char peerPub[32];
+    if (!tokenToX25519PublicKey(trimmed, peerPub)) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: bad sender public key\n");
       return;
     }
 
-    unsigned char myPrivX25519[32];
-    if (!identityEd25519PrivToX25519(g_identity.priv, myPrivX25519)) {
-      printMessage(COLOR_RED, "[!] ", "DM_REQ: key conversion failed\n");
-      return;
-    }
-
     unsigned char sharedKey[32];
-    bool ecdhOk = ecdhDeriveKey(myPrivX25519, peerPubX25519, sharedKey);
-    memset(myPrivX25519, 0, sizeof(myPrivX25519));
-    if (!ecdhOk) {
+    if (!ecdhDeriveKey(g_identity.priv, peerPub, sharedKey)) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: ECDH failed\n");
       return;
     }
@@ -327,14 +322,13 @@ static void *receiveThread(void *arg) {
   char buffer[MSG_SIZE];
 
   while (true) {
-    ssize_t received = recv(g_socketFD, buffer, MSG_SIZE - 1, 0);
+    ssize_t received = tlsRecv(g_ssl, buffer, MSG_SIZE);
+
     if (received == 0) {
       handleDisconnect();
       break;
     }
     if (received < 0) {
-      if (errno == EINTR)
-        continue;
       handleDisconnect();
       break;
     }
@@ -354,18 +348,14 @@ static bool sendToServer(const char *message) {
     return false;
   }
 
-  size_t length = strlen(message) + 1;
+  size_t length = strlen(message);
   if (length >= MSG_SIZE) {
     printMessage(COLOR_RED, "[!] ", "Message too long\n");
     return false;
   }
 
-  ssize_t sent = send(g_socketFD, message, length, 0);
-  if (sent < 0) {
-    if (errno == EPIPE || errno == ECONNRESET)
-      handleDisconnect();
-    else
-      printMessage(COLOR_RED, "[!] ", "Send failed\n");
+  if (!tlsSend(g_ssl, message, length)) {
+    handleDisconnect();
     return false;
   }
   return true;
@@ -396,22 +386,14 @@ static void handleDmCommand(const char *token) {
     return;
   }
 
-  unsigned char peerPubX25519[32];
-  if (!tokenToX25519PublicKey(token, peerPubX25519)) {
+  unsigned char peerPub[32];
+  if (!tokenToX25519PublicKey(token, peerPub)) {
     printMessage(COLOR_RED, "[!] ", "Token contains invalid hex characters\n");
     return;
   }
 
-  unsigned char myPrivX25519[32];
-  if (!identityEd25519PrivToX25519(g_identity.priv, myPrivX25519)) {
-    printMessage(COLOR_RED, "[!] ", "Key conversion failed\n");
-    return;
-  }
-
   unsigned char sharedKey[32];
-  bool ecdhOk = ecdhDeriveKey(myPrivX25519, peerPubX25519, sharedKey);
-  memset(myPrivX25519, 0, sizeof(myPrivX25519));
-  if (!ecdhOk) {
+  if (!ecdhDeriveKey(g_identity.priv, peerPub, sharedKey)) {
     printMessage(COLOR_RED, "[!] ", "ECDH key derivation failed\n");
     return;
   }
@@ -467,8 +449,12 @@ static bool processInput(char *message, size_t msgLen) {
 
     deriveKeyFromPassword(message, g_encryption.key);
     g_encryption.hasKey = true;
+
+    char hashHex[SHA256_HEX_SIZE];
+    sha256Hex(message, strlen(message), hashHex);
+
     char toSend[MSG_SIZE];
-    snprintf(toSend, sizeof(toSend), "%s\n", message);
+    snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
     sendToServer(toSend);
     return true;
   }
@@ -682,8 +668,24 @@ static bool connectToServer(const char *ip, int port) {
     free(address);
     return false;
   }
-
   free(address);
+
+  SSL_CTX *ctx = tlsClientCtxCreate();
+  if (!ctx) {
+    printMessage(COLOR_RED, "[!] ", "Failed to create TLS context\n");
+    close(g_socketFD);
+    return false;
+  }
+
+  g_ssl = tlsClientConnect(ctx, g_socketFD);
+  SSL_CTX_free(ctx);
+
+  if (!g_ssl) {
+    printMessage(COLOR_RED, "[!] ", "TLS handshake failed\n");
+    close(g_socketFD);
+    return false;
+  }
+
   return true;
 }
 
@@ -714,17 +716,18 @@ int main(int argc, char *argv[]) {
 
   {
     char challengeBuf[MSG_SIZE];
-    ssize_t n = recv(g_socketFD, challengeBuf, sizeof(challengeBuf) - 1, 0);
+    ssize_t n = tlsRecv(g_ssl, challengeBuf, sizeof(challengeBuf));
     if (n <= 0) {
       fprintf(stderr, "auth: no challenge received from server\n");
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
-    challengeBuf[n] = '\0';
 
     if (strncmp(challengeBuf, "CHALLENGE:", 10) != 0 ||
         strlen(challengeBuf) < 10 + CHALLENGE_HEX_LEN) {
-      fprintf(stderr, "auth: unexpected server message: %s\n", challengeBuf);
+      fprintf(stderr, "auth: unexpected server frame: %s\n", challengeBuf);
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
@@ -732,33 +735,31 @@ int main(int argc, char *argv[]) {
     const char *hexNonce = challengeBuf + 10;
     unsigned char nonce[CHALLENGE_BYTES];
     bool decodeOk = true;
-    for (int i = 0; i < CHALLENGE_BYTES; i++) {
-      int hi, lo;
+    static const char hextab[] = "0123456789abcdefABCDEF";
+    for (int i = 0; i < CHALLENGE_BYTES && decodeOk; i++) {
       char hc = hexNonce[i * 2], lc = hexNonce[i * 2 + 1];
+      int hi = -1, lo = -1;
       if (hc >= '0' && hc <= '9')
         hi = hc - '0';
       else if (hc >= 'a' && hc <= 'f')
         hi = hc - 'a' + 10;
       else if (hc >= 'A' && hc <= 'F')
         hi = hc - 'A' + 10;
-      else {
-        decodeOk = false;
-        break;
-      }
       if (lc >= '0' && lc <= '9')
         lo = lc - '0';
       else if (lc >= 'a' && lc <= 'f')
         lo = lc - 'a' + 10;
       else if (lc >= 'A' && lc <= 'F')
         lo = lc - 'A' + 10;
-      else {
+      if (hi < 0 || lo < 0)
         decodeOk = false;
-        break;
-      }
-      nonce[i] = (unsigned char)((hi << 4) | lo);
+      else
+        nonce[i] = (unsigned char)((hi << 4) | lo);
     }
+    (void)hextab;
     if (!decodeOk) {
-      fprintf(stderr, "auth: malformed nonce in challenge\n");
+      fprintf(stderr, "auth: malformed nonce\n");
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
@@ -766,6 +767,7 @@ int main(int argc, char *argv[]) {
     unsigned char sig[SIG_BYTES];
     if (!identitySign(&g_identity, nonce, CHALLENGE_BYTES, sig)) {
       fprintf(stderr, "auth: signing failed\n");
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
@@ -781,25 +783,26 @@ int main(int argc, char *argv[]) {
     char authMsg[MSG_SIZE];
     snprintf(authMsg, sizeof(authMsg), "AUTH:%s:%s\n", g_identity.token,
              sigHex);
-    if (send(g_socketFD, authMsg, strlen(authMsg), 0) < 0) {
-      perror("auth: send AUTH");
+    if (!tlsSend(g_ssl, authMsg, strlen(authMsg))) {
+      fprintf(stderr, "auth: send failed\n");
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
 
     char ackBuf[MSG_SIZE];
-    n = recv(g_socketFD, ackBuf, sizeof(ackBuf) - 1, 0);
+    n = tlsRecv(g_ssl, ackBuf, sizeof(ackBuf));
     if (n <= 0) {
       fprintf(stderr, "auth: no acknowledgement from server\n");
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
-    ackBuf[n] = '\0';
 
     if (strncmp(ackBuf, "RESAuthenticated", 16) != 0) {
-
       fprintf(stderr, "auth: rejected by server: %s\n",
               n > 3 ? ackBuf + 3 : ackBuf);
+      tlsFree(g_ssl);
       close(g_socketFD);
       return 1;
     }
@@ -808,13 +811,14 @@ int main(int argc, char *argv[]) {
   pthread_t recvTid;
   if (pthread_create(&recvTid, NULL, receiveThread, NULL) != 0) {
     printMessage(COLOR_RED, "[!] ", "Failed to create receive thread\n");
+    tlsFree(g_ssl);
     close(g_socketFD);
     return 1;
   }
   pthread_detach(recvTid);
 
   clearScreen();
-  print("SocketChat CLI (E2E Encrypted)\n");
+  print("SocketChat CLI (E2E Encrypted, TLS)\n");
   printf("Connected to " COLOR_GREEN "%s:%d\n" COLOR_RESET, ip, port);
   printf("Your token:   " COLOR_GREEN "%s\n" COLOR_RESET, g_identity.token);
   print("Type /help to view commands\n\n");
@@ -824,6 +828,7 @@ int main(int argc, char *argv[]) {
   disableRawMode();
 
   printMessage(COLOR_YELLOW, "\n[*] ", "Shutting down...\n");
+  tlsFree(g_ssl);
   close(g_socketFD);
   pthread_mutex_destroy(&g_input.mutex);
   return 0;

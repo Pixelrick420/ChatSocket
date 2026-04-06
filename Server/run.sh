@@ -10,6 +10,7 @@ gcc server.c \
     ../Utils/socketUtil.c \
     ../Utils/sha256.c \
     ../Utils/identity.c \
+    ../Utils/tls.c \
     -o server \
     -lpthread -lssl -lcrypto \
     -Wall -Wextra -O2

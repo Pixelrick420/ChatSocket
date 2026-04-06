@@ -1,13 +1,47 @@
 #include "../Utils/identity.h"
 #include "../Utils/sha256.h"
 #include "../Utils/socketUtil.h"
-
-#include <openssl/rand.h>
+#include "../Utils/tls.h"
 
 #define LOCALHOST "0.0.0.0"
 #define BACKLOG 10
 #define MAX_CLIENTS 32
 #define MAX_ROOMS 50
+
+typedef struct {
+  int socketFD;
+  SSL *ssl;
+} SslEntry;
+
+static SslEntry g_sslMap[MAX_CLIENTS];
+static int g_sslCount = 0;
+static SSL_CTX *g_sslCtx = NULL;
+
+static void sslMapAdd(int fd, SSL *ssl) {
+  if (g_sslCount < MAX_CLIENTS) {
+    g_sslMap[g_sslCount].socketFD = fd;
+    g_sslMap[g_sslCount].ssl = ssl;
+    g_sslCount++;
+  }
+}
+
+static SSL *sslMapGet(int fd) {
+  for (int i = 0; i < g_sslCount; i++)
+    if (g_sslMap[i].socketFD == fd)
+      return g_sslMap[i].ssl;
+  return NULL;
+}
+
+static void sslMapRemove(int fd) {
+  for (int i = 0; i < g_sslCount; i++) {
+    if (g_sslMap[i].socketFD == fd) {
+      tlsFree(g_sslMap[i].ssl);
+      g_sslMap[i] = g_sslMap[--g_sslCount];
+      return;
+    }
+  }
+}
+
 #define TOKEN_HEX_LEN 64
 
 typedef struct {
@@ -64,7 +98,45 @@ static bool tokenMapLookupByFD(int fd, char out[TOKEN_HEX_LEN + 1]) {
 static ServerContext *g_context = NULL;
 
 static void sendResponse(int socketFD, const char *message) {
-  send(socketFD, message, strlen(message), 0);
+  pthread_mutex_lock(&g_context->mutex);
+  SSL *ssl = sslMapGet(socketFD);
+  pthread_mutex_unlock(&g_context->mutex);
+
+  if (ssl)
+    tlsSend(ssl, message, strlen(message));
+}
+
+static void tlsBroadcastToRoom(int roomIdx, int senderFD, const char *msg) {
+  int fds[MAX_ROOM_MEMBERS];
+  int count = 0;
+
+  pthread_mutex_lock(&g_context->mutex);
+  Room *room = g_context->rooms[roomIdx];
+  updateRoomActivity(room);
+  for (int i = 0; i < room->memberCount; i++)
+    if (room->members[i] != senderFD)
+      fds[count++] = room->members[i];
+  pthread_mutex_unlock(&g_context->mutex);
+
+  size_t msgLen = strlen(msg);
+  for (int i = 0; i < count; i++) {
+    pthread_mutex_lock(&g_context->mutex);
+    SSL *ssl = sslMapGet(fds[i]);
+    pthread_mutex_unlock(&g_context->mutex);
+
+    if (ssl)
+      tlsSend(ssl, msg, msgLen);
+  }
+}
+
+static ssize_t recvClient(int socketFD, char *buf, size_t maxLen) {
+  pthread_mutex_lock(&g_context->mutex);
+  SSL *ssl = sslMapGet(socketFD);
+  pthread_mutex_unlock(&g_context->mutex);
+
+  if (ssl)
+    return tlsRecv(ssl, buf, maxLen);
+  return recv(socketFD, buf, maxLen - 1, 0);
 }
 
 static void trimNewlines(char *str) {
@@ -168,8 +240,7 @@ static void cmdSetName(Client *client, const char *buffer) {
     char announcement[MSG_SIZE];
     snprintf(announcement, sizeof(announcement), "RES%s is now known as %s\n",
              oldName, client->name);
-    broadcastToRoom(g_context, client->currentRoom, client->socketFD,
-                    announcement);
+    tlsBroadcastToRoom(client->currentRoom, client->socketFD, announcement);
   }
 }
 
@@ -259,7 +330,7 @@ static void cmdEnterRoom(Client *client, const char *buffer) {
     sendResponse(client->socketFD, "PASPassword: ");
 
     char inputPass[MAX_NAME_LEN];
-    ssize_t passLen = recv(client->socketFD, inputPass, MAX_NAME_LEN - 1, 0);
+    ssize_t passLen = recvClient(client->socketFD, inputPass, MAX_NAME_LEN - 1);
     if (passLen <= 0)
       return;
 
@@ -275,8 +346,8 @@ static void cmdEnterRoom(Client *client, const char *buffer) {
       return;
     }
 
-    if (!verifyHashedPass(g_context->rooms[roomIdx]->password, roomName,
-                          inputPass)) {
+    if (!verifyHashedPassPrehashed(g_context->rooms[roomIdx]->password,
+                                   roomName, inputPass)) {
       pthread_mutex_unlock(&g_context->mutex);
       sendResponse(client->socketFD, "RESIncorrect password\n");
       return;
@@ -309,7 +380,7 @@ static void cmdEnterRoom(Client *client, const char *buffer) {
   char announcement[MSG_SIZE];
   snprintf(announcement, sizeof(announcement), "RES%s joined the room\n",
            client->name);
-  broadcastToRoom(g_context, roomIdx, client->socketFD, announcement);
+  tlsBroadcastToRoom(roomIdx, client->socketFD, announcement);
 }
 
 static void cmdLeaveRoom(Client *client) {
@@ -321,8 +392,7 @@ static void cmdLeaveRoom(Client *client) {
   char announcement[MSG_SIZE];
   snprintf(announcement, sizeof(announcement), "RES%s left the room\n",
            client->name);
-  broadcastToRoom(g_context, client->currentRoom, client->socketFD,
-                  announcement);
+  tlsBroadcastToRoom(client->currentRoom, client->socketFD, announcement);
 
   leaveCurrentRoom(client);
   sendResponse(client->socketFD, "RESLeft room\n");
@@ -341,7 +411,7 @@ static void cmdSendMessage(Client *client, const char *buffer) {
 
   char message[MSG_SIZE];
   snprintf(message, sizeof(message), "MSG%s: %s\n", client->name, text);
-  broadcastToRoom(g_context, client->currentRoom, client->socketFD, message);
+  tlsBroadcastToRoom(client->currentRoom, client->socketFD, message);
 }
 
 static bool cmdAuth(Client *client, const char *buffer,
@@ -466,7 +536,12 @@ static void cmdRouteDirectMessage(Client *client, const char *buffer) {
     }
   }
 
-  send(targetFD, forwarded, (size_t)fwdLen, 0);
+  pthread_mutex_lock(&g_context->mutex);
+  SSL *targetSsl = sslMapGet(targetFD);
+  pthread_mutex_unlock(&g_context->mutex);
+
+  if (targetSsl)
+    tlsSend(targetSsl, forwarded, (size_t)fwdLen);
 }
 
 static void cmdListRooms(Client *client) {
@@ -522,19 +597,18 @@ static void *handleClient(void *arg) {
   }
 
   {
-    ssize_t received = recv(client->socketFD, buffer, MSG_SIZE - 1, 0);
+    ssize_t received = recvClient(client->socketFD, buffer, MSG_SIZE - 1);
     if (received <= 0)
       goto disconnect;
     buffer[received] = '\0';
 
     if (parseCommand(buffer) != CMD_AUTH || !cmdAuth(client, buffer, nonce)) {
-
       goto disconnect;
     }
   }
 
   while (true) {
-    ssize_t received = recv(client->socketFD, buffer, MSG_SIZE - 1, 0);
+    ssize_t received = recvClient(client->socketFD, buffer, MSG_SIZE - 1);
     if (received <= 0)
       break;
 
@@ -583,6 +657,7 @@ disconnect:
   leaveCurrentRoom(client);
   pthread_mutex_lock(&g_context->mutex);
   tokenMapRemoveByFD(client->socketFD);
+  sslMapRemove(client->socketFD);
   pthread_mutex_unlock(&g_context->mutex);
   removeClient(g_context, client->socketFD);
   close(client->socketFD);
@@ -603,6 +678,12 @@ static void *cleanupThread(void *arg) {
 int main(void) {
   const char *portEnv = getenv("PORT");
   int serverPort = portEnv ? atoi(portEnv) : PORT;
+
+  g_sslCtx = tlsServerCtxCreate();
+  if (!g_sslCtx) {
+    fprintf(stderr, "Failed to create TLS context\n");
+    return 1;
+  }
 
   int serverSocketFD = createTCPSocket();
   if (serverSocketFD < 0) {
@@ -627,7 +708,7 @@ int main(void) {
     return 1;
   }
 
-  printf("Server listening on port %d  (max %d clients, %d rooms)\n",
+  printf("Server listening on port %d  (TLS, max %d clients, %d rooms)\n",
          serverPort, MAX_CLIENTS, MAX_ROOMS);
 
   g_context = createServerContext(serverSocketFD, MAX_CLIENTS, MAX_ROOMS);
@@ -650,16 +731,34 @@ int main(void) {
     }
 
     if (!addClient(g_context, client)) {
-      sendResponse(client->socketFD, "ERRServer is full\n");
+
+      send(client->socketFD, "ERRServer is full\n", 18, 0);
       close(client->socketFD);
       free(client->address);
       free(client);
       continue;
     }
 
+    SSL *ssl = tlsServerAccept(g_sslCtx, client->socketFD);
+    if (!ssl) {
+      fprintf(stderr, "TLS handshake failed for new client\n");
+      removeClient(g_context, client->socketFD);
+      close(client->socketFD);
+      free(client->address);
+      free(client);
+      continue;
+    }
+
+    pthread_mutex_lock(&g_context->mutex);
+    sslMapAdd(client->socketFD, ssl);
+    pthread_mutex_unlock(&g_context->mutex);
+
     pthread_t tid;
     if (pthread_create(&tid, NULL, handleClient, client) != 0) {
       perror("pthread_create");
+      pthread_mutex_lock(&g_context->mutex);
+      sslMapRemove(client->socketFD);
+      pthread_mutex_unlock(&g_context->mutex);
       removeClient(g_context, client->socketFD);
       close(client->socketFD);
       free(client->address);
@@ -671,5 +770,6 @@ int main(void) {
 
   shutdown(serverSocketFD, SHUT_RDWR);
   destroyServerContext(g_context);
+  SSL_CTX_free(g_sslCtx);
   return 0;
 }

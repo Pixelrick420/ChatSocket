@@ -1,17 +1,5 @@
 #include "identity.h"
 
-#include <errno.h>
-#include <fcntl.h>
-#include <openssl/evp.h>
-#include <openssl/rand.h>
-#include <openssl/sha.h>
-#include <pwd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 static void bytesToHex(const unsigned char *bytes, size_t len, char *out) {
   static const char hex[] = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) {

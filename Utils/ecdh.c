@@ -1,10 +1,5 @@
 #include "ecdh.h"
 
-#include <openssl/evp.h>
-#include <openssl/kdf.h>
-#include <stdio.h>
-#include <string.h>
-
 static int hexNibble(char c) {
   if (c >= '0' && c <= '9')
     return c - '0';

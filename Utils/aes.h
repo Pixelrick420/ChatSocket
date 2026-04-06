@@ -2,11 +2,12 @@
 #ifndef AES_H
 #define AES_H
 
+#include "sha256.h"
 #include <stddef.h>
 #include <stdbool.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include "sha256.h"
+#include <string.h>
 
 typedef struct
 {

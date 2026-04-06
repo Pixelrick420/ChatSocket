@@ -11,6 +11,7 @@ gcc client.c \
     ../Utils/identity.c \
     ../Utils/ecdh.c \
     ../Utils/history.c \
+    ../Utils/tls.c \
     -o client \
     -lpthread -lssl -lcrypto \
     -Wall -Wextra -O2

@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <termios.h>
 #include <time.h>
+#include <openssl/rand.h>
 #include <unistd.h>
 
 #define MSG_SIZE         2048

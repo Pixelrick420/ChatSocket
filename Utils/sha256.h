@@ -4,6 +4,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define SHA256_HEX_SIZE   65
 #define SHA256_BYTES_SIZE 32
@@ -28,5 +31,7 @@ void sha256Bytes(const void *src, size_t n_bytes, void *dst_bytes32);
 char *createHashedPass(const char *roomName, const char *password);
 int verifyHashedPass(const char *stored, const char *roomName,
                      const char *password);
+int verifyHashedPassPrehashed(const char *stored, const char *roomName,
+                               const char *passwordSha256Hex);
 
 #endif

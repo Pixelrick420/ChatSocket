@@ -4,6 +4,10 @@
 
 #include "identity.h"
 #include <stdbool.h>
+#include <openssl/evp.h>
+#include <openssl/kdf.h>
+#include <stdio.h>
+#include <string.h>
 
 bool ecdhDeriveKey(const unsigned char myPrivX25519[32],
                    const unsigned char peerPubX25519[32],

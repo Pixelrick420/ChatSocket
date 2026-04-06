@@ -36,7 +36,6 @@ SocketAddress *createSocketAddress(const char *ipAddr, int port,
   } else {
     addr->sin_addr.s_addr = INADDR_ANY;
   }
-
   return addr;
 }
 

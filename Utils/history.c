@@ -1,16 +1,6 @@
 #include "history.h"
 #include "identity.h"
 
-#include <dirent.h>
-#include <errno.h>
-#include <pwd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
-
 #define MAX_LINE 2048
 
 static const char *homeDir(void) {

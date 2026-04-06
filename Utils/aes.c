@@ -1,5 +1,8 @@
 #include "aes.h"
-#include <string.h>
+
+#define GCM_NONCE_LEN 12
+#define GCM_TAG_LEN 16
+#define GCM_OVERHEAD (GCM_NONCE_LEN + GCM_TAG_LEN)
 
 void deriveKeyFromPassword(const char *password, unsigned char *key) {
   sha256Bytes(password, strlen(password), key);
@@ -7,11 +10,10 @@ void deriveKeyFromPassword(const char *password, unsigned char *key) {
 
 int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,
                    const unsigned char *key, unsigned char *ciphertext) {
-  unsigned char iv[16];
-  if (RAND_bytes(iv, sizeof(iv)) != 1)
-    return -1;
 
-  memcpy(ciphertext, iv, sizeof(iv));
+  unsigned char nonce[GCM_NONCE_LEN];
+  if (RAND_bytes(nonce, GCM_NONCE_LEN) != 1)
+    return -1;
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx)
@@ -19,18 +21,30 @@ int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,
 
   int len = 0, ciphertext_len = 0;
 
-  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_ctr(), NULL, key, iv) != 1)
+  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
     goto err;
-  if (EVP_EncryptUpdate(ctx, ciphertext + 16, &len, plaintext,
+
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_LEN, NULL) !=
+      1)
+    goto err;
+  if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
+    goto err;
+  if (EVP_EncryptUpdate(ctx, ciphertext + GCM_OVERHEAD, &len, plaintext,
                         (int)plaintext_len) != 1)
     goto err;
   ciphertext_len = len;
-  if (EVP_EncryptFinal_ex(ctx, ciphertext + 16 + len, &len) != 1)
+  if (EVP_EncryptFinal_ex(ctx, ciphertext + GCM_OVERHEAD + len, &len) != 1)
     goto err;
   ciphertext_len += len;
 
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_LEN,
+                          ciphertext + GCM_NONCE_LEN) != 1)
+    goto err;
+
+  memcpy(ciphertext, nonce, GCM_NONCE_LEN);
+
   EVP_CIPHER_CTX_free(ctx);
-  return ciphertext_len + 16;
+  return ciphertext_len + GCM_OVERHEAD;
 
 err:
   EVP_CIPHER_CTX_free(ctx);
@@ -39,11 +53,14 @@ err:
 
 int decryptMessage(const unsigned char *ciphertext, size_t ciphertext_len,
                    const unsigned char *key, unsigned char *plaintext) {
-  if (ciphertext_len < 16)
+
+  if (ciphertext_len < GCM_OVERHEAD)
     return -1;
 
-  unsigned char iv[16];
-  memcpy(iv, ciphertext, sizeof(iv));
+  const unsigned char *nonce = ciphertext;
+  const unsigned char *tag = ciphertext + GCM_NONCE_LEN;
+  const unsigned char *body = ciphertext + GCM_OVERHEAD;
+  size_t bodyLen = ciphertext_len - GCM_OVERHEAD;
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx)
@@ -51,13 +68,22 @@ int decryptMessage(const unsigned char *ciphertext, size_t ciphertext_len,
 
   int len = 0, plaintext_len = 0;
 
-  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_ctr(), NULL, key, iv) != 1)
+  if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1)
     goto err;
-  if (EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext + 16,
-                        (int)(ciphertext_len - 16)) != 1)
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_LEN, NULL) !=
+      1)
+    goto err;
+  if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
+    goto err;
+  if (EVP_DecryptUpdate(ctx, plaintext, &len, body, (int)bodyLen) != 1)
     goto err;
   plaintext_len = len;
-  if (EVP_DecryptFinal_ex(ctx, plaintext + len, &len) != 1)
+
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_LEN,
+                          (void *)tag) != 1)
+    goto err;
+
+  if (EVP_DecryptFinal_ex(ctx, plaintext + plaintext_len, &len) != 1)
     goto err;
   plaintext_len += len;
 
@@ -65,6 +91,9 @@ int decryptMessage(const unsigned char *ciphertext, size_t ciphertext_len,
   return plaintext_len;
 
 err:
+
+  if (plaintext_len > 0)
+    memset(plaintext, 0, (size_t)plaintext_len);
   EVP_CIPHER_CTX_free(ctx);
   return -1;
 }
