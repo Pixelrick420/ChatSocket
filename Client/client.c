@@ -68,6 +68,7 @@ static bool g_readingPassword = false;
 static char g_passwordBuffer[MSG_SIZE] = {0};
 static size_t g_passwordLen = 0;
 static bool g_waitingForRoomJoin = false;
+static bool g_promptRedrawn = false;
 
 typedef struct {
   char buffer[MSG_SIZE];
@@ -536,6 +537,7 @@ static void handleDmLeaveCommand(void) {
 static bool processInput(char *message, size_t msgLen) {
   if (msgLen == 0)
     return true;
+
   clientLog("processInput: '%s'", message);
 
   if (strcmp(message, "/exit") == 0) {
@@ -607,18 +609,26 @@ static bool processInput(char *message, size_t msgLen) {
     if (!encryptAndSendDm(message, msgLen))
       return true;
     historyAppend(g_dm.peerToken, true, message);
+
     char formatted[MSG_SIZE * 2];
     snprintf(formatted, sizeof(formatted), "%s[DM] >> %s%s\n", COLOR_GREEN,
              message, COLOR_RESET);
     eraseInputLine();
     print(formatted);
+    pthread_mutex_lock(&g_input.mutex);
+    g_input.buffer[0] = '\0';
+    g_input.length = 0;
+    pthread_mutex_unlock(&g_input.mutex);
     redrawInputLine();
+    g_promptRedrawn = true;
     return true;
   }
+
   if (!g_inRoom) {
     printMessage(COLOR_YELLOW, "[*] ", "Not in a room – use /enter <room>\n");
     return true;
   }
+
   if (g_encryption.hasKey)
     encryptAndSendRoom(message, msgLen);
   else {
@@ -684,6 +694,7 @@ static void inputLoop(void) {
       printf("\n");
       if (!processInput(normalBuf, normalLen))
         break;
+
       normalLen = 0;
       normalBuf[0] = '\0';
 
@@ -691,8 +702,13 @@ static void inputLoop(void) {
       g_input.buffer[0] = '\0';
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
-      printf(COLOR_GREEN ">>> " COLOR_RESET);
-      fflush(stdout);
+
+      if (!g_promptRedrawn) {
+        printf(COLOR_GREEN ">>> " COLOR_RESET);
+        fflush(stdout);
+      } else {
+        g_promptRedrawn = false;
+      }
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
