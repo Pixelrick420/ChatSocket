@@ -25,7 +25,7 @@ static void logOpen(void) {
   setvbuf(g_logFile, NULL, _IOLBF, 0);
 }
 
-static void clog(const char *fmt, ...) {
+static void clientLog(const char *fmt, ...) {
   if (!g_logFile)
     return;
 
@@ -76,7 +76,6 @@ typedef struct {
   size_t length;
   pthread_mutex_t mutex;
   bool connected;
-
   bool waitingForPassword;
 } InputState;
 
@@ -124,8 +123,8 @@ static void printMessage(const char *color, const char *prefix,
 }
 
 static void commitRoomEntry(void) {
-  clog("commitRoomEntry: entering room '%s' hasKey=%d", g_pendingRoom.roomName,
-       g_pendingRoom.hasKey);
+  clientLog("commitRoomEntry: entering room '%s' hasKey=%d",
+            g_pendingRoom.roomName, g_pendingRoom.hasKey);
 
   memset(&g_encryption, 0, sizeof(g_encryption));
   g_inRoom = false;
@@ -138,14 +137,15 @@ static void commitRoomEntry(void) {
     snprintf(g_encryption.roomName, sizeof(g_encryption.roomName), "%s",
              g_pendingRoom.roomName);
     g_encryption.hasKey = true;
-    clog("commitRoomEntry: encryption activated for room '%s'", g_currentRoom);
+    clientLog("commitRoomEntry: encryption activated for room '%s'",
+              g_currentRoom);
   }
 
   memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
 }
 
 static void clearRoomState(void) {
-  clog("clearRoomState: leaving room '%s'", g_currentRoom);
+  clientLog("clearRoomState: leaving room '%s'", g_currentRoom);
   memset(&g_encryption, 0, sizeof(g_encryption));
   memset(g_currentRoom, 0, sizeof(g_currentRoom));
   g_inRoom = false;
@@ -153,7 +153,7 @@ static void clearRoomState(void) {
 }
 
 static void clearDmSession(void) {
-  clog("clearDmSession");
+  clientLog("clearDmSession");
   memset(&g_dm, 0, sizeof(g_dm));
 }
 
@@ -163,7 +163,7 @@ static bool encryptAndSendDm(const char *message, size_t msgLen) {
                                      g_dm.key, ciphertext);
   if (ciphertextLen <= 0) {
     printMessage(COLOR_RED, "[!] ", "Failed to encrypt DM\n");
-    clog("encryptAndSendDm: encrypt failed");
+    clientLog("encryptAndSendDm: encrypt failed");
     return false;
   }
   char encoded[MSG_SIZE * 2];
@@ -177,7 +177,7 @@ static bool decryptAndDisplayDm(const char *encryptedData) {
   unsigned char decoded[MSG_SIZE];
   int decodedLen = decodeBase64(encryptedData, decoded);
   if (decodedLen <= 0) {
-    clog("decryptAndDisplayDm: base64 decode failed");
+    clientLog("decryptAndDisplayDm: base64 decode failed");
     return false;
   }
 
@@ -185,7 +185,7 @@ static bool decryptAndDisplayDm(const char *encryptedData) {
   int decryptedLen =
       decryptMessage(decoded, (size_t)decodedLen, g_dm.key, decrypted);
   if (decryptedLen <= 0) {
-    clog("decryptAndDisplayDm: decrypt/auth failed");
+    clientLog("decryptAndDisplayDm: decrypt/auth failed");
     return false;
   }
   decrypted[decryptedLen] = '\0';
@@ -204,7 +204,7 @@ static bool encryptAndSendRoom(const char *message, size_t msgLen) {
                                      g_encryption.key, ciphertext);
   if (ciphertextLen <= 0) {
     printMessage(COLOR_RED, "[!] ", "Failed to encrypt message\n");
-    clog("encryptAndSendRoom: encrypt failed");
+    clientLog("encryptAndSendRoom: encrypt failed");
     return false;
   }
   char encoded[MSG_SIZE * 2];
@@ -219,7 +219,7 @@ static bool decryptAndDisplayRoom(const char *encryptedData,
   unsigned char decoded[MSG_SIZE];
   int decodedLen = decodeBase64(encryptedData, decoded);
   if (decodedLen <= 0) {
-    clog("decryptAndDisplayRoom: base64 decode failed");
+    clientLog("decryptAndDisplayRoom: base64 decode failed");
     return false;
   }
 
@@ -227,7 +227,8 @@ static bool decryptAndDisplayRoom(const char *encryptedData,
   int decryptedLen =
       decryptMessage(decoded, (size_t)decodedLen, g_encryption.key, decrypted);
   if (decryptedLen <= 0) {
-    clog("decryptAndDisplayRoom: decrypt/auth failed (wrong key or tampered)");
+    clientLog(
+        "decryptAndDisplayRoom: decrypt/auth failed (wrong key or tampered)");
     return false;
   }
   decrypted[decryptedLen] = '\0';
@@ -246,7 +247,7 @@ static bool decryptAndDisplayRoom(const char *encryptedData,
 static void handleIncomingDm(const char *frame) {
   const char *p = frame + 3;
   if (strlen(p) < TOKEN_HEX_LEN + 1) {
-    clog("handleIncomingDm: frame too short");
+    clientLog("handleIncomingDm: frame too short");
     return;
   }
 
@@ -255,8 +256,8 @@ static void handleIncomingDm(const char *frame) {
   senderToken[TOKEN_HEX_LEN] = '\0';
 
   const char *payload = p + TOKEN_HEX_LEN + 1;
-  clog("handleIncomingDm: from %.16s... payload-prefix=%.7s", senderToken,
-       payload);
+  clientLog("handleIncomingDm: from %.16s... payload-prefix=%.7s", senderToken,
+            payload);
 
   if (strncmp(payload, "DM_REQ:", 7) == 0) {
     const char *peerPubHex = payload + 7;
@@ -266,13 +267,13 @@ static void handleIncomingDm(const char *frame) {
     unsigned char peerPubX25519[32];
     if (!tokenToX25519PublicKey(trimmed, peerPubX25519)) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: bad sender public key\n");
-      clog("handleIncomingDm: DM_REQ bad pubkey");
+      clientLog("handleIncomingDm: DM_REQ bad pubkey");
       return;
     }
     unsigned char myPrivX25519[32];
     if (!identityEd25519PrivToX25519(g_identity.priv, myPrivX25519)) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: key conversion failed\n");
-      clog("handleIncomingDm: DM_REQ key conversion failed");
+      clientLog("handleIncomingDm: DM_REQ key conversion failed");
       return;
     }
     unsigned char sharedKey[32];
@@ -280,7 +281,7 @@ static void handleIncomingDm(const char *frame) {
     memset(myPrivX25519, 0, sizeof(myPrivX25519));
     if (!ecdhOk) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: ECDH failed\n");
-      clog("handleIncomingDm: DM_REQ ECDH failed");
+      clientLog("handleIncomingDm: DM_REQ ECDH failed");
       return;
     }
 
@@ -288,7 +289,8 @@ static void handleIncomingDm(const char *frame) {
     g_dm.active = true;
     snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", senderToken);
     memcpy(g_dm.key, sharedKey, 32);
-    clog("handleIncomingDm: DM session established with %.16s...", senderToken);
+    clientLog("handleIncomingDm: DM session established with %.16s...",
+              senderToken);
 
     eraseInputLine();
     if (historyExists(senderToken)) {
@@ -317,7 +319,8 @@ static void handleIncomingDm(const char *frame) {
                "[!] Encrypted DM from %.16s... (no active session)\n",
                senderToken);
       printMessage(COLOR_RED, "", msg);
-      clog("handleIncomingDm: ENC from unknown session %.16s...", senderToken);
+      clientLog("handleIncomingDm: ENC from unknown session %.16s...",
+                senderToken);
       redrawInputLine();
       return;
     }
@@ -328,20 +331,20 @@ static void handleIncomingDm(const char *frame) {
     return;
   }
 
-  clog("handleIncomingDm: unrecognised payload prefix from %.16s...",
-       senderToken);
+  clientLog("handleIncomingDm: unrecognised payload prefix from %.16s...",
+            senderToken);
 }
 
 static bool handleRoomResponse(const char *text) {
 
   if (strncmp(text, "Entered room '", 14) == 0) {
-    clog("handleRoomResponse: server confirmed entry");
+    clientLog("handleRoomResponse: server confirmed entry");
     commitRoomEntry();
     return false;
   }
 
   if (strncmp(text, "Left room", 9) == 0) {
-    clog("handleRoomResponse: server confirmed leave");
+    clientLog("handleRoomResponse: server confirmed leave");
     clearRoomState();
     return false;
   }
@@ -349,7 +352,7 @@ static bool handleRoomResponse(const char *text) {
   if (strncmp(text, "Incorrect password", 18) == 0 ||
       strncmp(text, "Room '", 6) == 0) {
 
-    clog("handleRoomResponse: entry failed or room error: %s", text);
+    clientLog("handleRoomResponse: entry failed or room error: %s", text);
     memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
 
     return false;
@@ -365,7 +368,7 @@ static void displayIncomingMessage(char *buffer) {
   bool isPas = (buffer[0] == 'P' && buffer[1] == 'A' && buffer[2] == 'S');
   bool isDm = (buffer[0] == 'D' && buffer[1] == 'M' && buffer[2] == ':');
 
-  clog("recv: %.80s", buffer);
+  clientLog("recv: %.80s", buffer);
 
   eraseInputLine();
 
@@ -390,13 +393,13 @@ static void displayIncomingMessage(char *buffer) {
     }
 
     if (isEncryptedMessage(messageStart) && g_encryption.hasKey) {
-      clog("recv MSG from %s: encrypted, attempting decrypt", username);
+      clientLog("recv MSG from %s: encrypted, attempting decrypt", username);
       if (!decryptAndDisplayRoom(messageStart + 4, username))
         printMessage(COLOR_RED, "[!] ",
                      "Failed to decrypt message (wrong key?)\n");
     } else if (isEncryptedMessage(messageStart) && !g_encryption.hasKey) {
 
-      clog("recv MSG from %s: encrypted but no key held", username);
+      clientLog("recv MSG from %s: encrypted but no key held", username);
       char warn[MSG_SIZE];
       snprintf(warn, sizeof(warn),
                "[!] Encrypted message from %s (not in an encrypted room)\n",
@@ -420,7 +423,7 @@ static void displayIncomingMessage(char *buffer) {
     }
 
   } else if (isErr) {
-    clog("recv ERR: %s", buffer + 3);
+    clientLog("recv ERR: %s", buffer + 3);
     printMessage(COLOR_RED, "[!] ", buffer + 3);
 
   } else if (isRes) {
@@ -429,22 +432,21 @@ static void displayIncomingMessage(char *buffer) {
     printMessage(COLOR_YELLOW, "[*] ", text);
 
   } else if (isPas) {
-
-    clog("recv PAS: password prompt");
-    printMessage(COLOR_YELLOW, "[*] ", buffer + 3);
-
+    clientLog("recv PAS: password prompt");
+    // Clear the current input line and print the prompt
+    eraseInputLine();
+    printf(COLOR_YELLOW "%s" COLOR_RESET, buffer + 3);
+    fflush(stdout);
     pthread_mutex_lock(&g_input.mutex);
+    g_input.waitingForPassword = true;
+    // Discard any previously typed characters (clear normal buffer)
     g_input.buffer[0] = '\0';
     g_input.length = 0;
-    g_input.waitingForPassword = true;
     pthread_mutex_unlock(&g_input.mutex);
-
-    printf(COLOR_GREEN ">>> " COLOR_RESET);
-    fflush(stdout);
+    // Do NOT redraw the normal input line – we are in password mode
     return;
-
   } else {
-    clog("recv UNKNOWN: %.80s", buffer);
+    clientLog("recv UNKNOWN: %.80s", buffer);
     printMessage(COLOR_RED, "[!] ", "Unknown message type from server:\n");
     printMessage(COLOR_RED, "    ", buffer);
     print("\n");
@@ -462,7 +464,7 @@ static void handleDisconnect(void) {
   printMessage(COLOR_RED, "\n[!] ", "Disconnected from server\n");
   printMessage(COLOR_YELLOW, "[*] ", "Press Enter to exit.\n");
   fflush(stdout);
-  clog("disconnected from server");
+  clientLog("disconnected from server");
   close(g_socketFD);
 }
 
@@ -502,7 +504,7 @@ static bool sendToServer(const char *message) {
     return false;
   }
 
-  clog("send: %.120s", message);
+  clientLog("send: %.120s", message);
 
   if (!tlsSend(g_ssl, message, length)) {
     handleDisconnect();
@@ -512,7 +514,7 @@ static bool sendToServer(const char *message) {
 }
 
 static void handleLeaveCommand(void) {
-  clog("cmd /leave");
+  clientLog("cmd /leave");
   clearRoomState();
   sendToServer("/leave\n");
 }
@@ -573,7 +575,7 @@ static void handleDmCommand(const char *token) {
   g_dm.active = true;
   snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", token);
   memcpy(g_dm.key, sharedKey, 32);
-  clog("cmd /dm: session opened with %.16s...", token);
+  clientLog("cmd /dm: session opened with %.16s...", token);
 
   char dmReq[MSG_SIZE];
   snprintf(dmReq, sizeof(dmReq), "DM:%s:DM_REQ:%s\n", token, g_identity.token);
@@ -597,32 +599,10 @@ static void handleDmLeaveCommand(void) {
 }
 
 static bool processInput(char *message, size_t msgLen) {
-
-  pthread_mutex_lock(&g_input.mutex);
-  bool needsPass = g_input.waitingForPassword;
-  if (needsPass)
-    g_input.waitingForPassword = false;
-  pthread_mutex_unlock(&g_input.mutex);
-
-  if (needsPass) {
-    clog("processInput: received password (len=%zu)", msgLen);
-
-    memcpy(g_pendingRoom.key, (unsigned char[32]){0}, 32);
-    deriveKeyFromPassword(message, g_pendingRoom.key);
-    g_pendingRoom.hasKey = true;
-
-    char hashHex[SHA256_HEX_SIZE];
-    sha256Hex(message, strlen(message), hashHex);
-    char toSend[MSG_SIZE];
-    snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
-    sendToServer(toSend);
-    return true;
-  }
-
   if (msgLen == 0)
     return true;
 
-  clog("processInput: '%s' (len=%zu)", message, msgLen);
+  clientLog("processInput: '%s' (len=%zu)", message, msgLen);
 
   if (strcmp(message, "/exit") == 0) {
     sendToServer("/exit\n");
@@ -685,7 +665,7 @@ static bool processInput(char *message, size_t msgLen) {
     snprintf(g_pendingRoom.roomName, sizeof(g_pendingRoom.roomName), "%s",
              roomName);
     g_pendingRoom.pending = true;
-    clog("processInput: /enter '%s' pending", roomName);
+    clientLog("processInput: /enter '%s' pending", roomName);
 
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
@@ -716,7 +696,7 @@ static bool processInput(char *message, size_t msgLen) {
   if (!g_inRoom) {
     printMessage(COLOR_YELLOW, "[*] ",
                  "Not in a room — use /enter <room> first\n");
-    clog("processInput: tried to send message outside room");
+    clientLog("processInput: tried to send message outside room");
     return true;
   }
 
@@ -754,28 +734,73 @@ static void inputLoop(void) {
   while (true) {
     pthread_mutex_lock(&g_input.mutex);
     bool connected = g_input.connected;
+    bool waitingForPassword = g_input.waitingForPassword;
     pthread_mutex_unlock(&g_input.mutex);
+
     if (!connected)
       break;
 
+    // --- PASSWORD ENTRY MODE (silent, no echo) ---
+    if (waitingForPassword) {
+      char password[MSG_SIZE] = {0};
+      size_t pwdLen = 0;
+      // Read characters until newline, without echoing anything
+      while (true) {
+        char c;
+        if (read(STDIN_FILENO, &c, 1) != 1)
+          continue;
+        if (c == '\n' || c == '\r') {
+          printf("\n");
+          fflush(stdout);
+          break;
+        } else if ((c == 127 || c == 8) && pwdLen > 0) {
+          pwdLen--;
+          password[pwdLen] = '\0';
+          // Erase the last asterisk or character (though we echo nothing, just
+          // move cursor)
+          printf("\b \b");
+          fflush(stdout);
+        } else if (isprint((unsigned char)c) && pwdLen < MSG_SIZE - 1) {
+          password[pwdLen++] = c;
+          password[pwdLen] = '\0';
+          // No echo – keep terminal silent
+        }
+      }
+
+      // Send SHA256 hash of the password to the server
+      char hashHex[SHA256_HEX_SIZE];
+      sha256Hex(password, pwdLen, hashHex);
+      char toSend[MSG_SIZE];
+      snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
+      sendToServer(toSend);
+
+      // Derive AES key for room encryption
+      if (pwdLen > 0) {
+        deriveKeyFromPassword(password, g_pendingRoom.key);
+        g_pendingRoom.hasKey = true;
+      } else {
+        memset(g_pendingRoom.key, 0, 32);
+        g_pendingRoom.hasKey = false;
+      }
+
+      // Exit password mode
+      pthread_mutex_lock(&g_input.mutex);
+      g_input.waitingForPassword = false;
+      pthread_mutex_unlock(&g_input.mutex);
+
+      // Clear the password buffer from memory (security)
+      memset(password, 0, sizeof(password));
+
+      // Redraw normal prompt
+      printf(COLOR_GREEN ">>> " COLOR_RESET);
+      fflush(stdout);
+      continue;
+    }
+
+    // --- NORMAL INPUT MODE (commands and chat) ---
     char c;
     if (read(STDIN_FILENO, &c, 1) != 1)
       continue;
-
-    pthread_mutex_lock(&g_input.mutex);
-    bool waiting = g_input.waitingForPassword;
-    pthread_mutex_unlock(&g_input.mutex);
-
-    if (waiting && msgLen > 0) {
-      clog("inputLoop: flushing %zu stale bytes before password entry", msgLen);
-
-      for (size_t i = 0; i < msgLen; i++)
-        printf("\b \b");
-      fflush(stdout);
-      msgLen = 0;
-      message[0] = '\0';
-      clearInputBuffer();
-    }
 
     if (c == '\n' || c == '\r') {
       message[msgLen] = '\0';
@@ -788,14 +813,8 @@ static void inputLoop(void) {
       message[0] = '\0';
       clearInputBuffer();
 
-      pthread_mutex_lock(&g_input.mutex);
-      bool stillWaiting = g_input.waitingForPassword;
-      pthread_mutex_unlock(&g_input.mutex);
-
-      if (!stillWaiting) {
-        printf(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
-      }
+      printf(COLOR_GREEN ">>> " COLOR_RESET);
+      fflush(stdout);
 
     } else if ((c == 127 || c == 8) && msgLen > 0) {
       msgLen--;
@@ -873,19 +892,19 @@ static bool connectToServer(const char *ip, int port) {
     return false;
   }
 
-  clog("connectToServer: TLS connected to %s:%d", ip, port);
+  clientLog("connectToServer: TLS connected to %s:%d", ip, port);
   return true;
 }
 
 int main(int argc, char *argv[]) {
   logOpen();
-  clog("=== client starting ===");
+  clientLog("=== client starting ===");
 
   if (!identityLoadOrCreate(&g_identity)) {
     fprintf(stderr, "Fatal: could not load or create identity\n");
     return 1;
   }
-  clog("identity loaded, token=%.16s...", g_identity.token);
+  clientLog("identity loaded, token=%.16s...", g_identity.token);
 
   const char *ip = DEFAULT_IP;
   int port = DEFAULT_PORT;
@@ -989,7 +1008,7 @@ int main(int argc, char *argv[]) {
       close(g_socketFD);
       return 1;
     }
-    clog("auth: authenticated successfully");
+    clientLog("auth: authenticated successfully");
   }
 
   pthread_t recvTid;
@@ -1011,7 +1030,7 @@ int main(int argc, char *argv[]) {
   inputLoop();
   disableRawMode();
 
-  clog("=== client shutting down ===");
+  clientLog("=== client shutting down ===");
   printMessage(COLOR_YELLOW, "\n[*] ", "Shutting down...\n");
   tlsFree(g_ssl);
   close(g_socketFD);
