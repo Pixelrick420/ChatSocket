@@ -64,6 +64,10 @@ typedef struct {
 static DmSession g_dm = {0};
 
 static struct termios g_origTermios;
+static bool g_readingPassword = false;
+static char g_passwordBuffer[MSG_SIZE] = {0};
+static size_t g_passwordLen = 0;
+static bool g_waitingForRoomJoin = false;
 
 typedef struct {
   char buffer[MSG_SIZE];
@@ -86,13 +90,12 @@ static void disableRawMode(void) {
 }
 
 static void enableRawMode(void) {
-  tcgetattr(STDIN_FILENO, &g_origTermios);
-  atexit(disableRawMode);
-  struct termios raw = g_origTermios;
+  struct termios raw;
+  tcgetattr(STDIN_FILENO, &raw);
   raw.c_lflag &= ~(ICANON | ECHO);
   raw.c_cc[VMIN] = 1;
   raw.c_cc[VTIME] = 0;
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+  tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
 
 static void clearScreen(void) { print("\033[2J\033[H"); }
@@ -274,6 +277,12 @@ static void handleIncomingDm(const char *frame) {
 }
 
 static bool handleRoomResponse(const char *text) {
+  if (g_pendingRoom.pending) {
+    pthread_mutex_lock(&g_input.mutex);
+    g_waitingForRoomJoin = false;
+    pthread_mutex_unlock(&g_input.mutex);
+  }
+
   if (strncmp(text, "Entered room '", 14) == 0) {
     commitRoomEntry();
     return true;
@@ -284,58 +293,49 @@ static bool handleRoomResponse(const char *text) {
   }
   if (strncmp(text, "Incorrect password", 18) == 0 ||
       strncmp(text, "Room '", 6) == 0) {
+
     memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
     return false;
   }
   return false;
 }
 
-// ----- Dedicated password reading function (no race condition) -----
-static void read_password_and_send(void) {
-  struct termios old, new;
-  tcgetattr(STDIN_FILENO, &old);
-  new = old;
-  new.c_lflag &= ~ECHO;  // disable echo
-  new.c_lflag |= ICANON; // line buffered (so we get whole line)
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &new);
+static void finalizePasswordEntry(void) {
+  printf("\n");
+  fflush(stdout);
 
-  char password[MSG_SIZE] = {0};
-  if (fgets(password, sizeof(password), stdin)) {
-    // remove trailing newline
-    size_t len = strlen(password);
-    if (len > 0 && password[len - 1] == '\n')
-      password[--len] = '\0';
-    // echo asterisks manually (optional, but user expects)
-    printf("\r\033[K"); // clear the line
-    printf(COLOR_YELLOW "Password: " COLOR_RESET);
-    for (size_t i = 0; i < len; i++)
-      printf("*");
-    printf("\n");
-    fflush(stdout);
+  char passwordHash[SHA256_HEX_SIZE];
+  sha256Hex(g_passwordBuffer, g_passwordLen, passwordHash);
 
-    // send SHA256 hash to server
-    char hashHex[SHA256_HEX_SIZE];
-    sha256Hex(password, len, hashHex);
-    char toSend[MSG_SIZE];
-    snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
-    sendToServer(toSend);
+  char toSend[MSG_SIZE];
+  memcpy(toSend, passwordHash, SHA256_HEX_SIZE - 1);
+  toSend[SHA256_HEX_SIZE - 1] = '\n';
+  toSend[SHA256_HEX_SIZE] = '\0';
+  clientLog("Sending hashed password to server for room '%s'",
+            g_pendingRoom.roomName);
+  sendToServer(toSend);
 
-    // derive AES key for room encryption
-    if (len > 0) {
-      deriveKeyFromPassword(password, g_pendingRoom.key);
-      g_pendingRoom.hasKey = true;
-    } else {
-      memset(g_pendingRoom.key, 0, 32);
-      g_pendingRoom.hasKey = false;
-    }
+  if (g_passwordLen > 0) {
+    deriveKeyFromPassword(g_passwordBuffer, g_pendingRoom.key);
+    g_pendingRoom.hasKey = true;
   } else {
-    // EOF or error – just send empty hash
-    sendToServer("\n");
+    memset(g_pendingRoom.key, 0, 32);
+    g_pendingRoom.hasKey = false;
   }
 
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
-  // Clear password from memory
-  memset(password, 0, sizeof(password));
+  memset(g_passwordBuffer, 0, sizeof(g_passwordBuffer));
+  memset(passwordHash, 0, sizeof(passwordHash));
+  g_passwordLen = 0;
+  pthread_mutex_lock(&g_input.mutex);
+  g_readingPassword = false;
+  pthread_mutex_unlock(&g_input.mutex);
+
+  pthread_mutex_lock(&g_input.mutex);
+  g_input.buffer[0] = '\0';
+  g_input.length = 0;
+  pthread_mutex_unlock(&g_input.mutex);
+  printf(COLOR_GREEN ">>> " COLOR_RESET);
+  fflush(stdout);
 }
 
 static void displayIncomingMessage(char *buffer) {
@@ -395,23 +395,15 @@ static void displayIncomingMessage(char *buffer) {
     handleRoomResponse(text);
     printMessage(COLOR_YELLOW, "[*] ", text);
   } else if (isPas) {
-    // Password prompt – switch to dedicated password input
-    eraseInputLine();
-    printf(COLOR_YELLOW "%s" COLOR_RESET, buffer + 3); // "Password: "
-    fflush(stdout);
-    // Temporarily leave raw mode, read password line, then re-enter raw mode
-    disableRawMode();
-    read_password_and_send();
-    enableRawMode();
-    // Redraw the normal prompt after password is handled
-    printf(COLOR_GREEN ">>> " COLOR_RESET);
-    fflush(stdout);
-    // Clear the normal input buffer to avoid leftover characters
     pthread_mutex_lock(&g_input.mutex);
-    g_input.buffer[0] = '\0';
-    g_input.length = 0;
+    g_readingPassword = true;
+    memset(g_passwordBuffer, 0, sizeof(g_passwordBuffer));
+    g_passwordLen = 0;
+    g_waitingForRoomJoin = false;
     pthread_mutex_unlock(&g_input.mutex);
-    redrawInputLine();
+    eraseInputLine();
+    printf(COLOR_YELLOW "%s" COLOR_RESET, buffer + 3);
+    fflush(stdout);
     return;
   } else {
     printMessage(COLOR_RED, "[!] ", "Unknown message from server\n");
@@ -473,14 +465,15 @@ static void handleLeaveCommand(void) {
 
 static void handleTokenCommand(void) {
   char msg[MSG_SIZE];
-  snprintf(msg, sizeof(msg), COLOR_GREEN "[*] " COLOR_RESET "Your token: %s\n",
+  snprintf(msg, sizeof(msg), COLOR_YELLOW "[*] Your token: %s\n" COLOR_RESET,
            g_identity.token);
   print(msg);
 }
 
 static void handleListCommand(void) {
-  print(COLOR_YELLOW "[*] " COLOR_RESET "DM conversations:\n");
+  print(COLOR_YELLOW "[*] DM conversations:\n");
   historyListAll();
+  print(COLOR_RESET);
 }
 
 static void handleDmCommand(const char *token) {
@@ -554,19 +547,20 @@ static bool processInput(char *message, size_t msgLen) {
     clearScreen();
     print("SocketChat CLI (E2E Encrypted, TLS)\n");
     printf("Your token:   " COLOR_GREEN "%s\n\n" COLOR_RESET, g_identity.token);
-    redrawInputLine();
+    pthread_mutex_lock(&g_input.mutex);
+    g_input.buffer[0] = '\0';
+    g_input.length = 0;
+    pthread_mutex_unlock(&g_input.mutex);
     return true;
   }
   if (strcmp(message, "/token") == 0) {
     eraseInputLine();
     handleTokenCommand();
-    redrawInputLine();
     return true;
   }
   if (strcmp(message, "/list") == 0) {
     eraseInputLine();
     handleListCommand();
-    redrawInputLine();
     return true;
   }
   if (strcmp(message, "/leave") == 0) {
@@ -576,7 +570,6 @@ static bool processInput(char *message, size_t msgLen) {
   if (strcmp(message, "/dmleave") == 0) {
     eraseInputLine();
     handleDmLeaveCommand();
-    redrawInputLine();
     return true;
   }
   if (strncmp(message, "/dm ", 4) == 0) {
@@ -596,6 +589,9 @@ static bool processInput(char *message, size_t msgLen) {
     snprintf(g_pendingRoom.roomName, sizeof(g_pendingRoom.roomName), "%s",
              roomName);
     g_pendingRoom.pending = true;
+    pthread_mutex_lock(&g_input.mutex);
+    g_waitingForRoomJoin = true;
+    pthread_mutex_unlock(&g_input.mutex);
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
@@ -642,13 +638,46 @@ static void inputLoop(void) {
   while (true) {
     pthread_mutex_lock(&g_input.mutex);
     bool connected = g_input.connected;
+    bool waitingForRoomJoin = g_waitingForRoomJoin;
     pthread_mutex_unlock(&g_input.mutex);
     if (!connected)
       break;
 
+    pthread_mutex_lock(&g_input.mutex);
+    bool readingPasswordNow = g_readingPassword;
+    pthread_mutex_unlock(&g_input.mutex);
+
+    if (waitingForRoomJoin && !readingPasswordNow) {
+      usleep(10000);
+      continue;
+    }
+
     char c;
     if (read(STDIN_FILENO, &c, 1) != 1)
       continue;
+
+    pthread_mutex_lock(&g_input.mutex);
+    readingPasswordNow = g_readingPassword;
+    pthread_mutex_unlock(&g_input.mutex);
+
+    if (readingPasswordNow) {
+      if (c == '\n' || c == '\r') {
+        finalizePasswordEntry();
+      } else if (c == 127 || c == 8) {
+        if (g_passwordLen > 0) {
+          g_passwordLen--;
+          g_passwordBuffer[g_passwordLen] = '\0';
+          printf("\b \b");
+          fflush(stdout);
+        }
+      } else if (isprint((unsigned char)c) && g_passwordLen < MSG_SIZE - 1) {
+        g_passwordBuffer[g_passwordLen++] = c;
+        g_passwordBuffer[g_passwordLen] = '\0';
+        printf("*");
+        fflush(stdout);
+      }
+      continue;
+    }
 
     if (c == '\n' || c == '\r') {
       normalBuf[normalLen] = '\0';
@@ -657,6 +686,7 @@ static void inputLoop(void) {
         break;
       normalLen = 0;
       normalBuf[0] = '\0';
+
       pthread_mutex_lock(&g_input.mutex);
       g_input.buffer[0] = '\0';
       g_input.length = 0;
@@ -738,6 +768,10 @@ static bool connectToServer(const char *ip, int port) {
 }
 
 int main(int argc, char *argv[]) {
+  tcgetattr(STDIN_FILENO, &g_origTermios);
+  atexit(disableRawMode);
+  enableRawMode();
+
   logOpen();
   clientLog("=== client starting ===");
   if (!identityLoadOrCreate(&g_identity)) {
@@ -758,10 +792,10 @@ int main(int argc, char *argv[]) {
       ip = arg;
     }
   }
+
   if (!connectToServer(ip, port))
     return 1;
 
-  // Authentication handshake
   {
     char challengeBuf[MSG_SIZE];
     ssize_t n = tlsRecv(g_ssl, challengeBuf, sizeof(challengeBuf));
@@ -844,7 +878,6 @@ int main(int argc, char *argv[]) {
     close(g_socketFD);
     return 1;
   }
-  pthread_detach(recvTid);
 
   clearScreen();
   print("SocketChat CLI (E2E Encrypted, TLS)\n");
@@ -853,6 +886,7 @@ int main(int argc, char *argv[]) {
   print("Type /help to view commands\n\n");
   enableRawMode();
   inputLoop();
+  pthread_join(recvTid, NULL);
   disableRawMode();
   clientLog("=== client shutting down ===");
   printMessage(COLOR_YELLOW, "\n[*] ", "Shutting down...\n");

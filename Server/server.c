@@ -55,7 +55,6 @@ static int g_tokenCount = 0;
 static int tokenMapSet(const char *token, int newFD) {
   for (int i = 0; i < g_tokenCount; i++) {
     if (strcmp(g_tokenMap[i].token, token) == 0) {
-
       return -1;
     }
   }
@@ -329,13 +328,14 @@ static void cmdEnterRoom(Client *client, const char *buffer) {
   if (needsPassword) {
     sendResponse(client->socketFD, "PASPassword: ");
 
-    char inputPass[MAX_NAME_LEN];
-    ssize_t passLen = recvClient(client->socketFD, inputPass, MAX_NAME_LEN - 1);
+    char inputPass[MSG_SIZE];
+    ssize_t passLen = recvClient(client->socketFD, inputPass, MSG_SIZE - 1);
     if (passLen <= 0)
       return;
 
     inputPass[passLen] = '\0';
     trimNewlines(inputPass);
+
     pthread_mutex_lock(&g_context->mutex);
     roomIdx = findRoomIndex(g_context, roomName);
     if (roomIdx == -1) {
@@ -346,8 +346,9 @@ static void cmdEnterRoom(Client *client, const char *buffer) {
       return;
     }
 
-    if (!verifyHashedPassPrehashed(g_context->rooms[roomIdx]->password,
-                                   roomName, inputPass)) {
+    bool ok = verifyHashedPassPrehashed(g_context->rooms[roomIdx]->password,
+                                        roomName, inputPass);
+    if (!ok) {
       pthread_mutex_unlock(&g_context->mutex);
       sendResponse(client->socketFD, "RESIncorrect password\n");
       return;
@@ -636,7 +637,6 @@ static void *handleClient(void *arg) {
       cmdSendMessage(client, buffer);
       break;
     case CMD_AUTH:
-
       sendResponse(client->socketFD, "ERRAlready authenticated\n");
       break;
     case CMD_DM:
@@ -731,7 +731,6 @@ int main(void) {
     }
 
     if (!addClient(g_context, client)) {
-
       send(client->socketFD, "ERRServer is full\n", 18, 0);
       close(client->socketFD);
       free(client->address);
@@ -741,7 +740,6 @@ int main(void) {
 
     SSL *ssl = tlsServerAccept(g_sslCtx, client->socketFD);
     if (!ssl) {
-      fprintf(stderr, "TLS handshake failed for new client\n");
       removeClient(g_context, client->socketFD);
       close(client->socketFD);
       free(client->address);
