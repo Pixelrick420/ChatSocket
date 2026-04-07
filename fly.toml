@@ -1,0 +1,10 @@
+app = "chatsocket"
+
+[build]
+
+[[services]]
+  internal_port = 2077
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 2077
