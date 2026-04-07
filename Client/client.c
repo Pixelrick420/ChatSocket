@@ -70,7 +70,6 @@ typedef struct {
   size_t length;
   pthread_mutex_t mutex;
   bool connected;
-  bool waitingForPassword;
 } InputState;
 
 static InputState g_input = {
@@ -78,7 +77,6 @@ static InputState g_input = {
     .length = 0,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .connected = true,
-    .waitingForPassword = false,
 };
 
 static bool sendToServer(const char *message);
@@ -287,9 +285,57 @@ static bool handleRoomResponse(const char *text) {
   if (strncmp(text, "Incorrect password", 18) == 0 ||
       strncmp(text, "Room '", 6) == 0) {
     memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-    return false; // entry failed
+    return false;
   }
   return false;
+}
+
+// ----- Dedicated password reading function (no race condition) -----
+static void read_password_and_send(void) {
+  struct termios old, new;
+  tcgetattr(STDIN_FILENO, &old);
+  new = old;
+  new.c_lflag &= ~ECHO;  // disable echo
+  new.c_lflag |= ICANON; // line buffered (so we get whole line)
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &new);
+
+  char password[MSG_SIZE] = {0};
+  if (fgets(password, sizeof(password), stdin)) {
+    // remove trailing newline
+    size_t len = strlen(password);
+    if (len > 0 && password[len - 1] == '\n')
+      password[--len] = '\0';
+    // echo asterisks manually (optional, but user expects)
+    printf("\r\033[K"); // clear the line
+    printf(COLOR_YELLOW "Password: " COLOR_RESET);
+    for (size_t i = 0; i < len; i++)
+      printf("*");
+    printf("\n");
+    fflush(stdout);
+
+    // send SHA256 hash to server
+    char hashHex[SHA256_HEX_SIZE];
+    sha256Hex(password, len, hashHex);
+    char toSend[MSG_SIZE];
+    snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
+    sendToServer(toSend);
+
+    // derive AES key for room encryption
+    if (len > 0) {
+      deriveKeyFromPassword(password, g_pendingRoom.key);
+      g_pendingRoom.hasKey = true;
+    } else {
+      memset(g_pendingRoom.key, 0, 32);
+      g_pendingRoom.hasKey = false;
+    }
+  } else {
+    // EOF or error – just send empty hash
+    sendToServer("\n");
+  }
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+  // Clear password from memory
+  memset(password, 0, sizeof(password));
 }
 
 static void displayIncomingMessage(char *buffer) {
@@ -346,30 +392,27 @@ static void displayIncomingMessage(char *buffer) {
     printMessage(COLOR_RED, "[!] ", buffer + 3);
   } else if (isRes) {
     const char *text = buffer + 3;
-    bool entered = handleRoomResponse(text);
+    handleRoomResponse(text);
     printMessage(COLOR_YELLOW, "[*] ", text);
-    // If we were waiting for a password and got an error, exit password mode
-    if (!entered) {
-      pthread_mutex_lock(&g_input.mutex);
-      if (g_input.waitingForPassword) {
-        g_input.waitingForPassword = false;
-        // Discard any leftover password characters
-        g_input.buffer[0] = '\0';
-        g_input.length = 0;
-      }
-      pthread_mutex_unlock(&g_input.mutex);
-    }
   } else if (isPas) {
-    // Password prompt from server
+    // Password prompt – switch to dedicated password input
     eraseInputLine();
     printf(COLOR_YELLOW "%s" COLOR_RESET, buffer + 3); // "Password: "
     fflush(stdout);
+    // Temporarily leave raw mode, read password line, then re-enter raw mode
+    disableRawMode();
+    read_password_and_send();
+    enableRawMode();
+    // Redraw the normal prompt after password is handled
+    printf(COLOR_GREEN ">>> " COLOR_RESET);
+    fflush(stdout);
+    // Clear the normal input buffer to avoid leftover characters
     pthread_mutex_lock(&g_input.mutex);
-    g_input.waitingForPassword = true;
     g_input.buffer[0] = '\0';
     g_input.length = 0;
     pthread_mutex_unlock(&g_input.mutex);
-    return; // Do NOT redraw normal prompt
+    redrawInputLine();
+    return;
   } else {
     printMessage(COLOR_RED, "[!] ", "Unknown message from server\n");
   }
@@ -599,65 +642,10 @@ static void inputLoop(void) {
   while (true) {
     pthread_mutex_lock(&g_input.mutex);
     bool connected = g_input.connected;
-    bool waitingPwd = g_input.waitingForPassword;
     pthread_mutex_unlock(&g_input.mutex);
-
     if (!connected)
       break;
 
-    // ----- PASSWORD MODE (echo '*', handle backspace) -----
-    if (waitingPwd) {
-      char pwd[MSG_SIZE] = {0};
-      size_t pwdLen = 0;
-      // Discard any pending input that might have been typed before prompt
-      while (true) {
-        char c;
-        if (read(STDIN_FILENO, &c, 1) != 1)
-          continue;
-        if (c == '\n' || c == '\r') {
-          printf("\n");
-          fflush(stdout);
-          break;
-        } else if ((c == 127 || c == 8) && pwdLen > 0) {
-          pwdLen--;
-          pwd[pwdLen] = '\0';
-          printf("\b \b"); // erase the last '*'
-          fflush(stdout);
-        } else if (isprint((unsigned char)c) && pwdLen < MSG_SIZE - 1) {
-          pwd[pwdLen++] = c;
-          pwd[pwdLen] = '\0';
-          printf("*");
-          fflush(stdout);
-        }
-      }
-      // Send hash and derive key
-      char hashHex[SHA256_HEX_SIZE];
-      sha256Hex(pwd, pwdLen, hashHex);
-      char toSend[MSG_SIZE];
-      snprintf(toSend, sizeof(toSend), "%s\n", hashHex);
-      sendToServer(toSend);
-      if (pwdLen > 0) {
-        deriveKeyFromPassword(pwd, g_pendingRoom.key);
-        g_pendingRoom.hasKey = true;
-      } else {
-        memset(g_pendingRoom.key, 0, 32);
-        g_pendingRoom.hasKey = false;
-      }
-      // Exit password mode
-      pthread_mutex_lock(&g_input.mutex);
-      g_input.waitingForPassword = false;
-      g_input.buffer[0] = '\0';
-      g_input.length = 0;
-      pthread_mutex_unlock(&g_input.mutex);
-      // Clear password from memory
-      memset(pwd, 0, sizeof(pwd));
-      // Redraw normal prompt
-      printf(COLOR_GREEN ">>> " COLOR_RESET);
-      fflush(stdout);
-      continue;
-    }
-
-    // ----- NORMAL MODE -----
     char c;
     if (read(STDIN_FILENO, &c, 1) != 1)
       continue;
