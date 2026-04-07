@@ -237,8 +237,8 @@ static void cmdSetName(Client *client, const char *buffer) {
 
   if (client->currentRoom != -1) {
     char announcement[MSG_SIZE];
-    snprintf(announcement, sizeof(announcement), "RES%s is now known as %s\n",
-             oldName, client->name);
+    snprintf(announcement, sizeof(announcement),
+             "RES%s changed their name to %s\n", oldName, client->name);
     tlsBroadcastToRoom(client->currentRoom, client->socketFD, announcement);
   }
 }

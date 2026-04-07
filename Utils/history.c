@@ -156,7 +156,7 @@ void historyListAll(void) {
     return;
   }
 
-  char dir[512];
+  char dir[1024];
   snprintf(dir, sizeof(dir), "%s/.socketchat", home);
 
   DIR *d = opendir(dir);
@@ -184,7 +184,7 @@ void historyListAll(void) {
     memcpy(token, entry->d_name + 3, tokenLen);
     token[tokenLen] = '\0';
 
-    char fullPath[640];
+    char fullPath[1024 + NAME_MAX + 2];
     snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, entry->d_name);
     struct stat st;
     char timeStr[32] = "unknown";
@@ -192,13 +192,7 @@ void historyListAll(void) {
       struct tm *tm = localtime(&st.st_mtime);
       strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", tm);
     }
-
-    if (tokenLen >= 20) {
-      printf("  %.16s...%.4s  (last active: %s)\n", token, token + tokenLen - 4,
-             timeStr);
-    } else {
-      printf("  %s  (last active: %s)\n", token, timeStr);
-    }
+    printf("  %s  (last active: %s)\n", token, timeStr);
     found++;
   }
   closedir(d);
