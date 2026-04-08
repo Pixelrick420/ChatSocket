@@ -68,7 +68,6 @@ static bool g_readingPassword = false;
 static char g_passwordBuffer[MSG_SIZE] = {0};
 static size_t g_passwordLen = 0;
 static bool g_waitingForRoomJoin = false;
-static bool g_promptRedrawn = false;
 
 typedef struct {
   char buffer[MSG_SIZE];
@@ -605,6 +604,8 @@ static bool processInput(char *message, size_t msgLen) {
     sendToServer(toSend);
     return true;
   }
+
+  // ---------- DM ACTIVE CASE (FIXED) ----------
   if (g_dm.active) {
     if (!encryptAndSendDm(message, msgLen))
       return true;
@@ -615,14 +616,17 @@ static bool processInput(char *message, size_t msgLen) {
              message, COLOR_RESET);
     eraseInputLine();
     print(formatted);
+
+    // Clear the input buffer so the old message doesn't linger
     pthread_mutex_lock(&g_input.mutex);
     g_input.buffer[0] = '\0';
     g_input.length = 0;
     pthread_mutex_unlock(&g_input.mutex);
-    redrawInputLine();
-    g_promptRedrawn = true;
+
+    // Do NOT redraw the prompt here – the outer inputLoop will do it once.
     return true;
   }
+  // ------------------------------------------------
 
   if (!g_inRoom) {
     printMessage(COLOR_YELLOW, "[*] ", "Not in a room – use /enter <room>\n");
@@ -703,12 +707,9 @@ static void inputLoop(void) {
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
 
-      if (!g_promptRedrawn) {
-        printf(COLOR_GREEN ">>> " COLOR_RESET);
-        fflush(stdout);
-      } else {
-        g_promptRedrawn = false;
-      }
+      // Always print a fresh prompt after processing a command
+      printf(COLOR_GREEN ">>> " COLOR_RESET);
+      fflush(stdout);
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
