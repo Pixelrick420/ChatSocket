@@ -333,22 +333,43 @@ static bool handleRoomResponse(const char *text) {
     pthread_mutex_lock(&g_input.mutex);
     g_waitingForRoomJoin = false;
     pthread_mutex_unlock(&g_input.mutex);
+
+    if (strncmp(text, "Entered room '", 14) == 0) {
+      commitRoomEntry();
+      redrawInputLine();
+      return true;
+    }
+    if (strncmp(text, "Left room", 9) == 0) {
+      clearRoomState();
+      redrawInputLine();
+      return true;
+    }
+    if (strncmp(text, "Incorrect password", 18) == 0 ||
+        strncmp(text, "Room '", 6) == 0) {
+
+      memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
+      redrawInputLine();
+      return false;
+    }
   }
 
-  if (strncmp(text, "Entered room '", 14) == 0) {
-    commitRoomEntry();
+  if (strncmp(text, "Room '", 6) == 0 && strstr(text, "created") != NULL) {
+    char roomName[MAX_NAME_LEN] = {0};
+    const char *start = text + 6;
+    const char *end = strstr(text, "' created");
+    if (start && end && end > start) {
+      size_t len = (size_t)(end - start);
+      if (len < MAX_NAME_LEN) {
+        memcpy(roomName, start, len);
+        roomName[len] = '\0';
+        snprintf(g_currentRoom, sizeof(g_currentRoom), "%s", roomName);
+        g_inRoom = true;
+      }
+    }
+    redrawInputLine();
     return true;
   }
-  if (strncmp(text, "Left room", 9) == 0) {
-    clearRoomState();
-    return true;
-  }
-  if (strncmp(text, "Incorrect password", 18) == 0 ||
-      strncmp(text, "Room '", 6) == 0) {
 
-    memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-    return false;
-  }
   return false;
 }
 
@@ -615,6 +636,7 @@ static bool processInput(char *message, size_t msgLen) {
     if (g_dm.active) {
       clearDmSession();
       printMessage(COLOR_YELLOW, "[*] ", "DM session closed (creating room)\n");
+      printPrompt();
     }
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
@@ -626,6 +648,7 @@ static bool processInput(char *message, size_t msgLen) {
     if (g_dm.active) {
       clearDmSession();
       printMessage(COLOR_YELLOW, "[*] ", "DM session closed (entering room)\n");
+      printPrompt();
     }
     char roomName[MAX_NAME_LEN] = {0};
     sscanf(message + 7, "%63s", roomName);
@@ -792,10 +815,9 @@ static void inputLoop(void) {
       g_input.buffer[0] = '\0';
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
-      g_expectServerResponse = false;
 
-      // Only print prompt if we won't get one from server response
-      printPrompt();
+      if (!g_expectServerResponse)
+        printPrompt();
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
