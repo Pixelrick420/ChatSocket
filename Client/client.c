@@ -337,11 +337,13 @@ static bool handleRoomResponse(const char *text) {
     if (strncmp(text, "Entered room '", 14) == 0) {
       commitRoomEntry();
       redrawInputLine();
+      g_expectServerResponse = false;
       return true;
     }
     if (strncmp(text, "Left room", 9) == 0) {
       clearRoomState();
       redrawInputLine();
+      g_expectServerResponse = false;
       return true;
     }
     if (strncmp(text, "Incorrect password", 18) == 0 ||
@@ -349,24 +351,14 @@ static bool handleRoomResponse(const char *text) {
 
       memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
       redrawInputLine();
+      g_expectServerResponse = false;
       return false;
     }
   }
 
-  if (strncmp(text, "Room '", 6) == 0 && strstr(text, "created") != NULL) {
-    char roomName[MAX_NAME_LEN] = {0};
-    const char *start = text + 6;
-    const char *end = strstr(text, "' created");
-    if (start && end && end > start) {
-      size_t len = (size_t)(end - start);
-      if (len < MAX_NAME_LEN) {
-        memcpy(roomName, start, len);
-        roomName[len] = '\0';
-        snprintf(g_currentRoom, sizeof(g_currentRoom), "%s", roomName);
-        g_inRoom = true;
-      }
-    }
+  if (strncmp(text, "Room '", 6) == 0 && strstr(text, "' created") != NULL) {
     redrawInputLine();
+    g_expectServerResponse = false;
     return true;
   }
 
@@ -816,8 +808,7 @@ static void inputLoop(void) {
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
 
-      if (!g_expectServerResponse)
-        printPrompt();
+      printPrompt();
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
