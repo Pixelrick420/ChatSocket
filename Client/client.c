@@ -72,6 +72,7 @@ static bool g_readingPassword = false;
 static char g_passwordBuffer[MSG_SIZE] = {0};
 static size_t g_passwordLen = 0;
 static bool g_waitingForRoomJoin = false;
+static bool g_expectServerResponse = false;  // true when we sent a msg that will get echoed back
 
 typedef struct {
   char buffer[MSG_SIZE];
@@ -395,16 +396,19 @@ static void displayIncomingMessage(char *buffer) {
   bool isPas = (buffer[0] == 'P' && buffer[1] == 'A' && buffer[2] == 'S');
   bool isDm = (buffer[0] == 'D' && buffer[1] == 'M' && buffer[2] == ':');
 
-  clientLog("recv: %.80s", buffer);
+clientLog("recv: %.80s", buffer);
   eraseInputLine();
   pthread_mutex_lock(&g_input.mutex);
   g_input.buffer[0] = '\0';
   g_input.length = 0;
+  bool expectResponse = g_expectServerResponse;
+  g_expectServerResponse = false;
   pthread_mutex_unlock(&g_input.mutex);
 
   if (isDm) {
     handleIncomingDm(buffer);
-    redrawInputLine();
+    if (expectResponse)
+      redrawInputLine();
     return;
   }
 
@@ -469,7 +473,9 @@ static void displayIncomingMessage(char *buffer) {
   } else {
     printMessage(COLOR_RED, "[!] ", "Unknown message from server\n");
   }
-  redrawInputLine();
+
+  if (expectResponse)
+    redrawInputLine();
 }
 
 static void handleDisconnect(void) {
@@ -655,13 +661,7 @@ static bool processInput(char *message, size_t msgLen) {
     g_waitingForRoomJoin = true;
     pthread_mutex_unlock(&g_input.mutex);
     char toSend[MSG_SIZE];
-    snprintf(toSend, sizeof(toSend), "%s\n", message);
-    sendToServer(toSend);
-    return true;
-  }
-  if (message[0] == '/') {
-    char toSend[MSG_SIZE];
-    snprintf(toSend, sizeof(toSend), "%s\n", message);
+snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
     return true;
   }
@@ -671,9 +671,9 @@ static bool processInput(char *message, size_t msgLen) {
     if (!encryptAndSendDm(message, msgLen))
       return true;
     historyAppend(g_dm.peerToken, true, message);
+    g_expectServerResponse = true;
     return true;
   }
-  // ------------------------------------------------
 
   if (!g_inRoom) {
     printMessage(COLOR_YELLOW, "[*] ", "Not in a room – use /enter <room>\n");
@@ -688,6 +688,7 @@ static bool processInput(char *message, size_t msgLen) {
     sendToServer(toSend);
   }
 
+  g_expectServerResponse = true;
   return true;
 }
 
@@ -753,9 +754,10 @@ static void inputLoop(void) {
       g_input.buffer[0] = '\0';
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
+      g_expectServerResponse = false;
 
-      // Don't print prompt here - redrawInputLine from receive thread will handle it
-      // This prevents double prompts when server broadcasts back
+      // Only print prompt if we won't get one from server response
+      printPrompt();
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
