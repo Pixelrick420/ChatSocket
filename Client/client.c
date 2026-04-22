@@ -384,8 +384,7 @@ static void finalizePasswordEntry(void) {
   g_input.buffer[0] = '\0';
   g_input.length = 0;
   pthread_mutex_unlock(&g_input.mutex);
-  printf(COLOR_GREEN ">>> " COLOR_RESET);
-  fflush(stdout);
+  printPrompt();
 }
 
 static void displayIncomingMessage(char *buffer) {
@@ -732,8 +731,7 @@ static bool processInput(char *message, size_t msgLen) {
 static void inputLoop(void) {
   char normalBuf[MSG_SIZE] = {0};
   size_t normalLen = 0;
-  printf(COLOR_GREEN ">>> " COLOR_RESET);
-  fflush(stdout);
+  printPrompt();
 
   while (true) {
     pthread_mutex_lock(&g_input.mutex);
@@ -794,8 +792,7 @@ static void inputLoop(void) {
       pthread_mutex_unlock(&g_input.mutex);
 
       // Always print a fresh prompt after processing a command
-      printf(COLOR_GREEN ">>> " COLOR_RESET);
-      fflush(stdout);
+      printPrompt();
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
