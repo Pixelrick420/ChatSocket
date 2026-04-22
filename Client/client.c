@@ -336,13 +336,11 @@ static bool handleRoomResponse(const char *text) {
 
     if (strncmp(text, "Entered room '", 14) == 0) {
       commitRoomEntry();
-      redrawInputLine();
       g_expectServerResponse = false;
       return true;
     }
     if (strncmp(text, "Left room", 9) == 0) {
       clearRoomState();
-      redrawInputLine();
       g_expectServerResponse = false;
       return true;
     }
@@ -350,14 +348,12 @@ static bool handleRoomResponse(const char *text) {
         strncmp(text, "Room '", 6) == 0) {
 
       memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-      redrawInputLine();
       g_expectServerResponse = false;
       return false;
     }
   }
 
   if (strncmp(text, "Room '", 6) == 0 && strstr(text, "' created") != NULL) {
-    redrawInputLine();
     g_expectServerResponse = false;
     return true;
   }
@@ -414,14 +410,10 @@ clientLog("recv: %.80s", buffer);
   pthread_mutex_lock(&g_input.mutex);
   g_input.buffer[0] = '\0';
   g_input.length = 0;
-  bool expectResponse = g_expectServerResponse;
-  g_expectServerResponse = false;
   pthread_mutex_unlock(&g_input.mutex);
 
   if (isDm) {
     handleIncomingDm(buffer);
-    if (expectResponse)
-      redrawInputLine();
     return;
   }
 
@@ -470,8 +462,12 @@ clientLog("recv: %.80s", buffer);
     printMessage(COLOR_RED, "[!] ", buffer + 3);
   } else if (isRes) {
     const char *text = buffer + 3;
-    handleRoomResponse(text);
+    bool success = handleRoomResponse(text);
     printMessage(COLOR_YELLOW, "[*] ", text);
+    if (success)
+      printPrompt();
+    else
+      printPrompt();
   } else if (isPas) {
     pthread_mutex_lock(&g_input.mutex);
     g_readingPassword = true;
@@ -479,16 +475,14 @@ clientLog("recv: %.80s", buffer);
     g_passwordLen = 0;
     g_waitingForRoomJoin = false;
     pthread_mutex_unlock(&g_input.mutex);
-    eraseInputLine();
+    printf("\n");
+    fflush(stdout);
     printf(COLOR_YELLOW "%s" COLOR_RESET, buffer + 3);
     fflush(stdout);
     return;
   } else {
     printMessage(COLOR_RED, "[!] ", "Unknown message from server\n");
   }
-
-  if (expectResponse)
-    redrawInputLine();
 }
 
 static void handleDisconnect(void) {
