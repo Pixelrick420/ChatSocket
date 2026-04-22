@@ -1340,12 +1340,12 @@ static void inputLoop(void) {
             continue;
         }
 
-        if (key == KEY_UP || key == 'k') {
+        if (key == KEY_UP || key == 'K') {
             g_msgScroll -= 3;
             refreshAll();
             continue;
         }
-        if (key == KEY_DOWN || key == 'j') {
+        if (key == KEY_DOWN || key == 'J') {
             g_msgScroll += 3;
             refreshAll();
             continue;
