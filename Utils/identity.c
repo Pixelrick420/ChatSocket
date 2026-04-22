@@ -59,6 +59,21 @@ static char *identityFilePath(void) {
   return path;
 }
 
+static char *usernameFilePath(void) {
+  const char *home = getenv("HOME");
+  if (!home) {
+    struct passwd *pw = getpwuid(getuid());
+    if (pw)
+      home = pw->pw_dir;
+  }
+  if (!home) return NULL;
+
+  char *path = malloc(512);
+  if (!path) return NULL;
+  snprintf(path, 512, "%s/.socketchat/username", home);
+  return path;
+}
+
 static bool deriveEd25519PublicKey(const unsigned char seed[IDENTITY_KEY_BYTES],
                                    unsigned char pub[IDENTITY_KEY_BYTES]) {
   EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed,
@@ -252,4 +267,89 @@ bool identityEd25519PrivToX25519(
 
 void identityPrintToken(const Identity *id) {
   printf("Your token: %s\n", id->token);
+}
+
+bool identityLoadUsername(char *username, size_t maxLen) {
+  char *path = usernameFilePath();
+  if (!path) return false;
+
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    free(path);
+    return false;
+  }
+
+  if (fgets(username, maxLen, f)) {
+    size_t len = strlen(username);
+    while (len > 0 && (username[len-1] == '\n' || username[len-1] == '\r')) {
+      username[--len] = '\0';
+    }
+    fclose(f);
+    free(path);
+    return len > 0;
+  }
+  fclose(f);
+  free(path);
+  return false;
+}
+
+bool identitySaveUsername(const char *username) {
+  char *path = usernameFilePath();
+  if (!path) return false;
+
+  FILE *f = fopen(path, "w");
+  if (!f) {
+    free(path);
+    return false;
+  }
+
+  fprintf(f, "%s\n", username);
+  fclose(f);
+  free(path);
+  return true;
+}
+
+bool identityLoadDmNicks(char nicks[50][MAX_NAME_LEN]) {
+  const char *home = getenv("HOME");
+  if (!home) return false;
+
+  char path[512];
+  snprintf(path, sizeof(path), "%s/.socketchat/dm_nicks", home);
+
+  FILE *f = fopen(path, "r");
+  if (!f) return false;
+
+  int count = 0;
+  char line[MAX_NAME_LEN];
+  while (fgets(line, sizeof(line), f) && count < 50) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+      line[--len] = '\0';
+    }
+    if (len > 0) {
+      snprintf(nicks[count], MAX_NAME_LEN, "%s", line);
+      count++;
+    }
+  }
+  fclose(f);
+  return count > 0;
+}
+
+bool identitySaveDmNicks(char nicks[50][MAX_NAME_LEN], int count) {
+  const char *home = getenv("HOME");
+  if (!home) return false;
+
+  char path[512];
+  snprintf(path, sizeof(path), "%s/.socketchat/dm_nicks", home);
+
+  FILE *f = fopen(path, "w");
+  if (!f) return false;
+
+  for (int i = 0; i < count; i++) {
+    if (nicks[i][0]) {
+      fprintf(f, "%s\n", nicks[i]);
+    }
+  }
+  fclose(f);
+  return true;
 }

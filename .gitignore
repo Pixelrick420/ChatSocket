@@ -1,3 +1,4 @@
 .vscode
-Client/client 
-Server/server 
+Client/client
+Server/server
+Client/test*

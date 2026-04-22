@@ -255,6 +255,10 @@ ssize_t tlsRecv(SSL *ssl, char *buf, size_t maxLen) {
   int err = SSL_get_error(ssl, n);
   if (err == SSL_ERROR_ZERO_RETURN)
     return 0;
+  if (err == SSL_ERROR_SYSCALL && errno == 0)
+    return 0;
+  if (err == SSL_ERROR_SSL)
+    return 0;
   tlsPrintErrors("SSL_read");
   return -1;
 }

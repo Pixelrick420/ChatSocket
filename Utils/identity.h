@@ -25,6 +25,24 @@
 #define CHALLENGE_BYTES      32
 #define CHALLENGE_HEX_LEN    64
 #define CHALLENGE_HEX_SIZE   65
+#define MAX_NAME_LEN         64
+#include <openssl/sha.h>
+#include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define IDENTITY_KEY_BYTES   32
+#define TOKEN_HEX_LEN        64
+#define TOKEN_STR_SIZE       65
+#define SIG_BYTES            64
+#define SIG_HEX_LEN         128
+#define SIG_HEX_SIZE        129
+#define CHALLENGE_BYTES      32
+#define CHALLENGE_HEX_LEN    64
+#define CHALLENGE_HEX_SIZE   65
 
 typedef struct {
     unsigned char priv[IDENTITY_KEY_BYTES];
@@ -47,5 +65,9 @@ bool identityEd25519PubToX25519(const unsigned char ed25519Pub[IDENTITY_KEY_BYTE
 bool identityEd25519PrivToX25519(const unsigned char ed25519Priv[IDENTITY_KEY_BYTES],
                                  unsigned char       x25519Out[IDENTITY_KEY_BYTES]);
 void identityPrintToken(const Identity *id);
+bool identityLoadUsername(char *username, size_t maxLen);
+bool identitySaveUsername(const char *username);
+bool identityLoadDmNicks(char nicks[50][MAX_NAME_LEN]);
+bool identitySaveDmNicks(char nicks[50][MAX_NAME_LEN], int count);
 
 #endif

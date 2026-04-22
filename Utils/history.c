@@ -200,3 +200,36 @@ void historyListAll(void) {
   if (found == 0)
     printf("  (no DM history found)\n");
 }
+
+int historyGetAll(char tokens[50][TOKEN_STR_SIZE]) {
+    const char *home = homeDir();
+    if (!home) return 0;
+
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/.socketchat", home);
+
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL && count < 50) {
+
+        if (strncmp(entry->d_name, "dm_", 3) != 0)
+            continue;
+        size_t len = strlen(entry->d_name);
+        if (len < 8)
+            continue;
+        if (strcmp(entry->d_name + len - 4, ".log") != 0)
+            continue;
+
+        size_t tokenLen = len - 3 - 4;
+        if (tokenLen > TOKEN_STR_SIZE)
+            tokenLen = TOKEN_STR_SIZE;
+        memcpy(tokens[count], entry->d_name + 3, tokenLen);
+        tokens[count][tokenLen] = '\0';
+        count++;
+    }
+    closedir(d);
+    return count;
+}

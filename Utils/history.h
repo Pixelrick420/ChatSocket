@@ -21,5 +21,6 @@ bool historyAppend(const char *peerToken, bool sent, const char *message);
 void historyPrint(const char *peerToken, size_t count);
 bool historyExists(const char *peerToken);
 void historyListAll(void);
+int historyGetAll(char tokens[50][TOKEN_STR_SIZE]);
 
 #endif

@@ -1,142 +1,135 @@
 # ChatSocket
 
-A multi-room, end-to-end encrypted chat server application written in C. Features password-protected rooms, client-side encryption, secure message broadcasting, and ngrok support for remote connections.
-
-Huge thanks to [STUDevLantern](https://www.youtube.com/@STUDevLantern) on Youtube for making [this](https://www.youtube.com/playlist?list=PLu_a4hjJo1mTiX7v_Uj2TixvjXsNsY7SZ) course on Socket Programming.
-
-## Overview
-
-ChatSocket is a TCP-based chat application that enables multiple users to communicate in separate chat rooms with end-to-end encryption. The server handles room management and message routing, while encryption/decryption occurs entirely on the client side, ensuring that messages remain encrypted during transmission.
+A multi-room, end-to-end encrypted chat application written in C with both CLI and TUI clients. Designed for secure communication with AES-256-CTR encryption for rooms and X25519 key exchange for direct messages.
 
 ## Features
 
-- **Multi-room Support**: Create and join multiple chat rooms
-- **End-to-End Encryption**: Messages encrypted client-side using AES-256-CTR
-- **Password-Protected Rooms**: Secure rooms with salted and hashed passwords
-- **Room-Based Key Derivation**: Each room derives encryption keys from user-provided passwords
-- **Concurrent Connections**: Multi-threaded server supporting up to 32 simultaneous clients
-- **Command Interface**: Simple command-based interaction for room management
-- **Automatic Cleanup**: Inactive rooms automatically cleaned up after 10 minutes
-- **Remote Access**: Built-in ngrok support for exposing server to the internet
-- **Raw Mode Terminal**: Real-time character input without waiting for Enter key
-- **Room Entry Notifications**: Automatic broadcast when users enter rooms
-- **Color-Coded Interface**: Visual distinction between messages, errors, and notifications
+- **Multi-room Support**: Create and join separate chat rooms
+- **End-to-End Encryption**: AES-256-CTR with password-derived keys for room messages
+- **Password-Protected Rooms**: Salted and hashed room passwords using SHA-256
+- **Direct Messages**: Encrypted DMs between users using X25519 key exchange
+- **Ed25519 Identity**: Persistent Ed25519 key pairs for user authentication
+- **TUI Client**: Modern ncurses-based terminal UI with split panels
+- **CLI Client**: Original raw-mode terminal client with real-time input
+- **TLS Support**: Secure transport layer for all connections
+- **Persistence**: Username, identity tokens, and DM nicknames saved locally
 
-## Screenshot:
-![3 clients connected to one server(top left)](image.png)
+## Quick Start
 
-## Technical Architecture
+```bash
+# Terminal 1: Start server
+cd Server && ./run.sh
 
-### Cryptographic Implementation
+# Terminal 2: Start TUI client
+cd Client && ./run_tui.sh
 
-#### Encryption
-- **Algorithm**: AES-256-CTR (Counter Mode)
-- **Key Derivation**: SHA-256 hash of room password
-- **IV Generation**: Random 16-byte initialization vector per message
-- **Message Format**: `ENC:<base64-encoded-ciphertext>`
+# Or CLI client
+cd Client && ./run.sh
+```
+
+Connect to a remote server by passing the address:
+```bash
+cd Client && ./run_tui.sh 192.168.1.100:2077
+```
+
+## Clients
+
+### TUI Client (`client_tui`)
+
+Modern ncurses interface (~1450 lines) with:
+- Split panel layout: messages on left (main area), sidebar on right (40 cols)
+- Scrollable message history (Up/Down, j/k, PageUp/PageDown, g/G for Home/End)
+- Mouse-free navigation with keyboard shortcuts
+- Warm/muted color palette (muted cyan for messages, green border for lobby, cyan for rooms, magenta for DMs)
+- Scroll position indicator in top bar
+- Help overlay (press ? or F1)
+- Persistent username saved to `~/.socketchat/username`
+- Persistent DM nicknames saved to `~/.socketchat/dm_nicks`
+- Auto-connect to server on startup if address saved
+
+### CLI Client (`client`)
+
+Original raw-mode terminal client with:
+- Real-time character input without pressing Enter
+- Backspace support for editing
+- Color-coded output
+- Manual connection to any server address
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Display available commands |
+| `/name <username>` | Set display name (persisted locally) |
+| `/create <room>` | Create a public room |
+| `/create <room> -p <pass>` | Create an encrypted room |
+| `/enter <room>` | Join a room |
+| `/leave` | Leave current room or DM |
+| `/rooms` | List available rooms from server |
+| `/dm <1\|token>` | Start DM (use index, prefix, or full token) |
+| `/dmleave` | Leave current DM session |
+| `/list` | Refresh local DM history |
+| `/nick <n> <name>` | Rename a DM by index |
+| `/token` | Show your Ed25519 identity token |
+| `/clear` | Clear current message view |
+| `/exit` | Disconnect and quit |
+
+DM syntax supports multiple formats:
+- `/dm 1` - use index number
+- `/dm abcdef12` - use 8+ character token prefix
+- `/dm MyFriend` - use saved nickname
+- `/dm <1>` - use indexed reference
+
+## Architecture
+
+### Network
+
+- **Protocol**: TCP/IPv4 with optional TLS
+- **Default Port**: 2077
+- **Port override**: Set `PORT` environment variable
+- **Message Size**: 2048 bytes (configurable in code)
+
+### Cryptography
+
+#### Room Encryption (AES-256-CTR)
+- Algorithm: AES-256 in Counter Mode
+- Key Derivation: SHA-256 of room password
+- IV: 16-byte random per message
+- Format: `ENC:<base64-encoded-ciphertext>`
+
+#### Direct Messages (X25519)
+- Key Exchange: X25519 Diffie-Hellman
+- Identity Keys: Ed25519 key pairs
+- Token Format: 64-character hex string
+- Per-message encryption with unique nonces
 
 #### Password Storage
-- **Hashing**: SHA-256 with 10,000 iterations
-- **Salt**: 16-byte random salt per room
-- **Format**: `<salt_hex>:<hash_hex>`
-- **Constant-Time Comparison**: Protection against timing attacks
-
-#### SHA-256 Implementation
-The SHA-256 implementation is based on the work from [Lulu's Blog on Lucidar](https://lucidar.me/en/dev-c-cpp/sha-256-in-c-cpp/), with modifications to suit the specific requirements of this application.
-
-### Network Architecture
-
-- **Protocol**: TCP/IPv4
-- **Default Port**: 2077 (configurable via `PORT` environment variable)
-- **Message Size**: 2048 bytes maximum (MSG_SIZE), configurable by changing memory allocation
-- **Connection Model**: One thread per client connection on the server side. On the client side 2 threads are active: 1 for sending and 1 for receiving messages.
+- Hashing: SHA-256 with 10,000 iterations
+- Salt: 16-byte random per room
+- Format: `<salt_hex>:<hash_hex>`
+- Constant-time comparison for verification
 
 ### Server Components
 
-#### Room Management
+- Thread-per-client model with detached threads
+- Mutex-protected shared state for rooms
 - Maximum 50 concurrent rooms
 - Maximum 32 members per room
-- Automatic cleanup of inactive rooms (1 hour timeout)
-- Password verification with constant-time comparison
-- Broadcast notifications for room entry/exit
+- Broadcast messaging within rooms
+- Room entry/exit notifications
 
-#### Client Handling
-- Thread-per-client model with detached threads
-- Mutex-protected shared state
-- Command parsing and routing
-- Message broadcasting within rooms
-- Support for both encrypted and plaintext messages
+### Client State
 
-### Client Components
+The TUI maintains several state files in `~/.socketchat/`:
+- `username` - Local username display
+- `identity` - Ed25519 private key
+- `dm_nicks` - Saved DM nicknames (JSON)
+- `server` - Last connected server address
 
-#### Terminal Interface
-- Raw mode terminal input for real-time character processing
-- Backspace support for editing input
-- Color-coded output (cyan for messages, red for errors, yellow for notifications, green for prompts)
-- Clear screen functionality
-- Input line preservation during message reception
-
-#### Message Processing
-- Separate receive thread for asynchronous message handling
-- Automatic encryption detection and decryption
-- Base64 encoding/decoding for binary data transmission
-- Proper handling of encrypted and plaintext messages
-- Username extraction and display
-
-#### Connection Management
-- Automatic disconnect detection
-- Graceful connection loss handling
-- Reconnection support via address specification
-- Support for both local and remote server connections
-
-#### Encryption State
-- Per-room encryption context
-- Key derivation on room entry
-- Automatic encryption for messages in protected rooms
-- Separate handling for password-protected and public rooms
-
-## Project Structure
-
-```
-ChatSocket/
-├── Client/
-│   ├── client.c           # Client implementation with raw mode terminal
-│   ├── client             # Compiled client binary
-│   └── run.sh             # Client build and run script
-├── Server/
-│   ├── server.c           # Server implementation with room notifications
-│   ├── server             # Compiled server binary
-│   └── run.sh             # Server build and run script with ngrok support
-├── Utils/
-│   ├── aes.c              # AES encryption implementation
-│   ├── aes.h              # AES header
-│   ├── sha256.c           # SHA-256 implementation
-│   ├── sha256.h           # SHA-256 header
-│   ├── socketUtil.c       # Socket utilities and room management
-│   └── socketUtil.h       # Socket utilities header
-├── Dockerfile             # Container configuration
-└── README.md              # This file
-```
-
-## Dependencies
-
-### Server
-- POSIX threads (pthread)
-- Standard C library
-- POSIX sockets
-
-### Client
-- POSIX threads (pthread)
-- OpenSSL (libssl, libcrypto) - for AES operations
-- Standard C library
-- POSIX sockets
-- termios - for raw mode terminal
-
-## Building and Running
+## Building
 
 ### Server
 
-#### Local Server
 ```bash
 cd Server
 gcc server.c ../Utils/socketUtil.c ../Utils/sha256.c -o server -lpthread
@@ -145,175 +138,141 @@ gcc server.c ../Utils/socketUtil.c ../Utils/sha256.c -o server -lpthread
 
 Or use the provided script:
 ```bash
-cd Server
-./run.sh
+cd Server && ./run.sh
 ```
 
-The server listens on `0.0.0.0:2077` by default.
+### CLI Client
 
-#### Remote Server (with ngrok)
-```bash
-cd Server
-./run.sh ngrok [port]
-```
-
-This will:
-1. Compile and start the server
-2. Launch ngrok to expose the server
-3. Display the public address for clients to connect to
-4. Show the ngrok dashboard URL (http://localhost:4040)
-
-Example:
-```bash
-./run.sh ngrok 2077
-```
-
-Output:
-```
-================================================
-Server Address: 0.tcp.ngrok.io:12345
-ngrok Dashboard: http://localhost:4040
-================================================
-```
-
-### Client
-
-#### Connecting to Local Server
 ```bash
 cd Client
 gcc client.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c -o client -lpthread -lssl -lcrypto
-./client
+./client [address:port]
 ```
 
-Or use the provided script:
+### TUI Client
+
 ```bash
 cd Client
-./run.sh
+gcc client_tui.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c ../Utils/identity.c ../Utils/history.c -o client_tui -lpthread -lssl -lcrypto -lncurses
+./client_tui [address:port]
 ```
 
-#### Connecting to Remote Server
-```bash
-cd Client
-./run.sh <address:port>
-```
+## Usage Examples
 
-Example:
-```bash
-./run.sh 0.tcp.ngrok.io:12345
-```
+### Basic Room Chat
 
-The client connects to `127.0.0.1:2077` by default. Specify an address to connect to a remote server.
-
-## Usage
-
-### Commands
-
-- `/help` - Display available commands
-- `/name <username>` - Set your display name
-- `/create <room> -p <password>` - Create a password-protected room
-- `/create <room>` - Create a public room (no encryption)
-- `/enter <room>` - Enter a room (prompts for password if protected)
-- `/leave` - Leave current room
-- `/clear` - Clear the terminal screen
-- `/exit` - Disconnect from server
-
-### Workflow Example
-
-1. Start the server (with ngrok for remote access):
+1. Start server:
    ```bash
-   cd Server && ./run.sh ngrok 2077
+   cd Server && ./run.sh
    ```
-   Note the public address displayed.
 
-2. Start a client and set your name:
-   ```bash
-   cd Client && ./run.sh 0.tcp.ngrok.io:12345
+2. Client A creates room:
+   ```
    >>> /name Alice
+   >>> /create project-alpha
+   [*] Room 'project-alpha' created
    ```
 
-3. Create an encrypted room:
+3. Client B joins:
    ```
-   >>> /create secure-room -p mypassword123
-   [*] Room 'secure-room' created
-   ```
-
-4. Enter the room (same client or another client):
-   ```
-   >>> /enter secure-room
-   [*] Password: mypassword123
-   [*] Entered room 'secure-room'
+   >>> /name Bob
+   >>> /enter project-alpha
+   [*] Entered room 'project-alpha'
    ```
 
-5. Send encrypted messages:
+4. Chat:
    ```
-   >>> Hello, this message is encrypted!
-   << Alice: Hello, this message is encrypted!
-   ```
-
-6. Leave the room:
-   ```
-   >>> /leave
-   [*] Left Room
+   >>> Hello team!
+   << Alice: Hello team!
    ```
 
-### Client Interface Features
+### Encrypted Room
 
-#### Input Handling
-- Type messages in real-time without pressing Enter to submit each character
-- Use backspace to edit your message before sending
-- Press Enter to send the complete message
-- The prompt `>>>` indicates you're ready to type
+1. Create password-protected room:
+   ```
+   >>> /create secrets -p mysecretpassword
+   [*] Room 'secrets' created
+   ```
 
-#### Color Coding
-- **Green (`>>>`)**: Input prompt
-- **Cyan (`<<`)**: Incoming messages
-- **Yellow (`[*]`)**: System notifications (room entry/exit, status messages)
-- **Red (`[!]`)**: Errors and warnings
+2. Others must enter with password:
+   ```
+   >>> /enter secrets
+   [*] Password: ********
+   [*] Entered room 'secrets'
+   ```
 
+### Direct Messages
+
+1. Get your token:
+   ```
+   >>> /token
+   [*] Token: abc123... (share this with friend)
+   ```
+
+2. Start DM using friend's token:
+   ```
+   >>> /dm abc123def456...
+   [*] DM established
+   ```
+
+3. Or view DM list and use index:
+   ```
+   >>> /list
+   >>> /dm 1
+   ```
+
+4. Rename DM for easy reference:
+   ```
+   >>> /nick 1 John
+   ```
 
 ## Security Considerations
 
 ### Strengths
-- End-to-end encryption ensures server cannot read message content
-- AES-256-CTR provides strong encryption
-- Salted password hashing with 10,000 iterations
-- Constant-time password comparison prevents timing attacks
-- Random IV generation for each message
-- Encryption keys never transmitted over the network
-- Password input hidden in terminal
+
+- End-to-end encryption - server cannot read message content
+- AES-256-CTR - industry-standard encryption
+- X25519 - modern elliptic curve key exchange
+- Ed25519 - secure identity authentication
+- Salted password hashing with high iteration count
+- Constant-time password comparison
+- Random IVs per message
+- Keys never transmitted over network
+- TLS option for transport security
 
 ### Limitations
-- Shared room passwords mean all room members have the same decryption key
-- No authentication of message origin
-- No key exchange mechanism - clients must pre-agree on password
-- No protection against replay attacks
-- Server can log encrypted messages
-- Metadata (usernames, timestamps, room membership) not protected
-- ngrok traffic is tunneled through third-party servers
 
+- Shared room passwords - all members have same key
+- No message authentication (spoofing possible)
+- Server logs encrypted metadata
+- Username/room membership visible to server
+- No forward secrecy
+
+## Troubleshooting
+
+### Connection Issues
+
+- Check server is running: `netstat -tlnp | grep 2077`
+- Verify firewall allows port 2077
+- Test local connection first: `telnet localhost 2077`
+
+### Build Errors
+
+- Install dependencies:
+  ```bash
+  # Debian/Ubuntu
+  sudo apt install build-essential libssl-dev libncurses-dev
+  
+  # macOS
+  brew install openssl ncurses
+  ```
+
+### Runtime Issues
+
+- Ensure `~/.socketchat/` directory exists for TUI
+- Check terminal supports 256 colors: `echo $TERM`
+- Try alternate TERM: `TERM=screen-256color ./client_tui`
 
 ## License
 
-This project is provided as-is for educational purposes.
-
-## Credits
-
-- SHA-256 implementation based on work by [Lucidar](https://lucidar.me/en/dev-c-cpp/sha-256-in-c-cpp/)
-- AES implementation using OpenSSL EVP interface
-- Socket programming concepts from [STUDevLantern](https://www.youtube.com/@STUDevLantern)
-- C standard library and Berkeley sockets
-- ngrok for secure tunneling
-
-## Contributing
-
-Contributions are welcome. Please ensure code follows the existing style and includes appropriate error handling. Key areas for contribution:
-- Security enhancements
-- Performance optimizations
-- Additional features
-- Bug fixes
-- Documentation improvements
-- Test coverage
-
-## Contact
-
-For issues, questions, or suggestions, please open an issue on the project repository.
+MIT - use as you wish.
