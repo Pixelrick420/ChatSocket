@@ -619,6 +619,7 @@ static bool processInput(char *message, size_t msgLen) {
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
+    g_expectServerResponse = true;
     return true;
   }
   if (strncmp(message, "/enter ", 7) == 0) {
@@ -637,22 +638,26 @@ static bool processInput(char *message, size_t msgLen) {
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
+    g_expectServerResponse = true;
     return true;
   }
   if (strcmp(message, "/leave") == 0) {
     handleLeaveCommand();
+    g_expectServerResponse = true;
     return true;
   }
   if (strcmp(message, "/rooms") == 0) {
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
+    g_expectServerResponse = true;
     return true;
   }
   if (strcmp(message, "/help") == 0) {
     char toSend[MSG_SIZE];
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
+    g_expectServerResponse = true;
     return true;
   }
   if (strcmp(message, "/clear") == 0) {
