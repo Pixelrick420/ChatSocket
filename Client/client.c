@@ -665,31 +665,11 @@ static bool processInput(char *message, size_t msgLen) {
     return true;
   }
 
-  // ---------- DM ACTIVE CASE (FIXED) ----------
+  // ---------- DM ACTIVE CASE ----------
   if (g_dm.active) {
     if (!encryptAndSendDm(message, msgLen))
       return true;
     historyAppend(g_dm.peerToken, true, message);
-
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char ts[16] = "00:00";
-    if (tm_info)
-      strftime(ts, sizeof(ts), "%H:%M", tm_info);
-
-    char formatted[MSG_SIZE * 2];
-    snprintf(formatted, sizeof(formatted), "%s[%s] %-30s [DM]%s\n", COLOR_GREEN,
-             ts, message, COLOR_RESET);
-    eraseInputLine();
-    print(formatted);
-
-    // Clear the input buffer so the old message doesn't linger
-    pthread_mutex_lock(&g_input.mutex);
-    g_input.buffer[0] = '\0';
-    g_input.length = 0;
-    pthread_mutex_unlock(&g_input.mutex);
-
-    // Do NOT redraw the prompt here – the outer inputLoop will do it once.
     return true;
   }
   // ------------------------------------------------
@@ -706,24 +686,6 @@ static bool processInput(char *message, size_t msgLen) {
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
   }
-
-  // Display sent room message
-  time_t now = time(NULL);
-  struct tm *tm_info = localtime(&now);
-  char ts[16] = "00:00";
-  if (tm_info)
-    strftime(ts, sizeof(ts), "%H:%M", tm_info);
-
-  char sentFormatted[MSG_SIZE * 2];
-  snprintf(sentFormatted, sizeof(sentFormatted), "%s[%s] %-30s [#%s]%s\n",
-           COLOR_GREEN, ts, message, g_currentRoom, COLOR_RESET);
-  eraseInputLine();
-  print(sentFormatted);
-
-  pthread_mutex_lock(&g_input.mutex);
-  g_input.buffer[0] = '\0';
-  g_input.length = 0;
-  pthread_mutex_unlock(&g_input.mutex);
 
   return true;
 }
@@ -791,8 +753,7 @@ static void inputLoop(void) {
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
 
-      // Always print a fresh prompt after processing a command
-      printPrompt();
+      // Prompt will be redrawn when displayIncomingMessage calls redrawInputLine
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
