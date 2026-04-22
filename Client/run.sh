@@ -18,10 +18,22 @@ gcc client.c \
 
 echo "Compiled successfully."
 
-if [ $# -eq 0 ]; then
-    echo "Connecting to localhost:2077..."
-    ./client
+# Check for -test flag as second argument
+if [ "$2" = "-test" ]; then
+    # Create temp HOME dir for test mode (allows multiple clients)
+    TEST_DIR=$(mktemp -d)
+    mkdir -p "$TEST_DIR/.socketchat"
+    echo "Running in TEST mode (temp identity: $TEST_DIR)..."
+    HOME="$TEST_DIR" ./client "$1"
+
+    # Cleanup after client exits
+    rm -rf "$TEST_DIR"
 else
-    echo "Connecting to $1..."
-    ./client "$1"
+    if [ $# -eq 0 ]; then
+        echo "Connecting to localhost:2077..."
+        ./client
+    else
+        echo "Connecting to $1..."
+        ./client "$1"
+    fi
 fi

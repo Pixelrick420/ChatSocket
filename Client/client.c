@@ -9,14 +9,15 @@
 #define DEFAULT_PORT 2077
 
 static FILE *g_logFile = NULL;
+static char g_logPath[256] = {0};
 
 static void logOpen(void) {
   const char *home = getenv("HOME");
   if (!home)
     return;
-  char path[512];
-  snprintf(path, sizeof(path), "%s/.socketchat/client.log", home);
-  g_logFile = fopen(path, "a");
+  pid_t pid = getpid();
+  snprintf(g_logPath, sizeof(g_logPath), "%s/.socketchat/client_%d.log", home, pid);
+  g_logFile = fopen(g_logPath, "a");
   if (!g_logFile) {
     perror("log: fopen");
     return;
@@ -753,7 +754,8 @@ static void inputLoop(void) {
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
 
-      // Prompt will be redrawn when displayIncomingMessage calls redrawInputLine
+      // Don't print prompt here - redrawInputLine from receive thread will handle it
+      // This prevents double prompts when server broadcasts back
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalLen--;
       normalBuf[normalLen] = '\0';
