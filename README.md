@@ -75,7 +75,6 @@ Original raw-mode terminal client with:
 | `/exit` | Disconnect and quit |
 
 DM syntax supports multiple formats:
-- `/dm 1` - use index number
 - `/dm abcdef12` - use 8+ character token prefix
 - `/dm MyFriend` - use saved nickname
 - `/dm <1>` - use indexed reference
