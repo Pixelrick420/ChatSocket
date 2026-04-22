@@ -606,9 +606,54 @@ static bool processInput(char *message, size_t msgLen) {
 
   clientLog("processInput: '%s'", message);
 
+  // Room commands work even when not in a room
   if (strcmp(message, "/exit") == 0) {
     sendToServer("/exit\n");
     return false;
+  }
+  if (strncmp(message, "/create ", 8) == 0) {
+    if (g_dm.active) {
+      clearDmSession();
+      printMessage(COLOR_YELLOW, "[*] ", "DM session closed (creating room)\n");
+    }
+    char toSend[MSG_SIZE];
+    snprintf(toSend, sizeof(toSend), "%s\n", message);
+    sendToServer(toSend);
+    return true;
+  }
+  if (strncmp(message, "/enter ", 7) == 0) {
+    if (g_dm.active) {
+      clearDmSession();
+      printMessage(COLOR_YELLOW, "[*] ", "DM session closed (entering room)\n");
+    }
+    char roomName[MAX_NAME_LEN] = {0};
+    sscanf(message + 7, "%63s", roomName);
+    memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
+    snprintf(g_pendingRoom.roomName, sizeof(g_pendingRoom.roomName), "%s", roomName);
+    g_pendingRoom.pending = true;
+    pthread_mutex_lock(&g_input.mutex);
+    g_waitingForRoomJoin = true;
+    pthread_mutex_unlock(&g_input.mutex);
+    char toSend[MSG_SIZE];
+    snprintf(toSend, sizeof(toSend), "%s\n", message);
+    sendToServer(toSend);
+    return true;
+  }
+  if (strcmp(message, "/leave") == 0) {
+    handleLeaveCommand();
+    return true;
+  }
+  if (strcmp(message, "/rooms") == 0) {
+    char toSend[MSG_SIZE];
+    snprintf(toSend, sizeof(toSend), "%s\n", message);
+    sendToServer(toSend);
+    return true;
+  }
+  if (strcmp(message, "/help") == 0) {
+    char toSend[MSG_SIZE];
+    snprintf(toSend, sizeof(toSend), "%s\n", message);
+    sendToServer(toSend);
+    return true;
   }
   if (strcmp(message, "/clear") == 0) {
     eraseInputLine();
@@ -646,28 +691,16 @@ static bool processInput(char *message, size_t msgLen) {
     handleDmCommand(token);
     return true;
   }
-  if (strncmp(message, "/enter ", 7) == 0) {
-    if (g_dm.active) {
-      clearDmSession();
-      printMessage(COLOR_YELLOW, "[*] ", "DM session closed (entering room)\n");
-    }
-    char roomName[MAX_NAME_LEN] = {0};
-    sscanf(message + 7, "%63s", roomName);
-    memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-    snprintf(g_pendingRoom.roomName, sizeof(g_pendingRoom.roomName), "%s",
-             roomName);
-    g_pendingRoom.pending = true;
-    pthread_mutex_lock(&g_input.mutex);
-    g_waitingForRoomJoin = true;
-    pthread_mutex_unlock(&g_input.mutex);
-    char toSend[MSG_SIZE];
-snprintf(toSend, sizeof(toSend), "%s\n", message);
-    sendToServer(toSend);
-    return true;
-  }
 
   // ---------- DM ACTIVE CASE ----------
   if (g_dm.active) {
+    // Allow certain commands even in DM
+    if (message[0] == '/') {
+      char toSend[MSG_SIZE];
+      snprintf(toSend, sizeof(toSend), "%s\n", message);
+      sendToServer(toSend);
+      return true;
+    }
     if (!encryptAndSendDm(message, msgLen))
       return true;
     historyAppend(g_dm.peerToken, true, message);
