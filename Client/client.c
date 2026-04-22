@@ -60,6 +60,9 @@ typedef struct {
   bool active;
   char peerToken[TOKEN_STR_SIZE];
   unsigned char key[32];
+  bool pending;
+  unsigned char pendingKey[32];
+  char pendingToken[TOKEN_STR_SIZE];
 } DmSession;
 static DmSession g_dm = {0};
 
@@ -84,6 +87,7 @@ static InputState g_input = {
 };
 
 static bool sendToServer(const char *message);
+static void printPrompt(void);
 
 static void disableRawMode(void) {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_origTermios);
@@ -102,8 +106,20 @@ static void clearScreen(void) { print("\033[2J\033[H"); }
 static void eraseInputLine(void) { print("\r\033[K"); }
 
 static void redrawInputLine(void) {
+  printPrompt();
+}
+
+static void printPrompt(void) {
   pthread_mutex_lock(&g_input.mutex);
-  printf(COLOR_GREEN ">>> " COLOR_RESET "%s", g_input.buffer);
+  if (g_dm.active) {
+    char shortToken[17];
+    snprintf(shortToken, sizeof(shortToken), "%.16s", g_dm.peerToken);
+    printf(COLOR_GREEN "[DM:%.8s...]> " COLOR_RESET "%s", shortToken, g_input.buffer);
+  } else if (g_inRoom) {
+    printf(COLOR_GREEN "[#%.14s]> " COLOR_RESET "%s", g_currentRoom, g_input.buffer);
+  } else {
+    printf(COLOR_GREEN ">>> " COLOR_RESET "%s", g_input.buffer);
+  }
   fflush(stdout);
   pthread_mutex_unlock(&g_input.mutex);
 }
@@ -171,9 +187,16 @@ static bool decryptAndDisplayDm(const char *encryptedData) {
   if (decryptedLen <= 0)
     return false;
   decrypted[decryptedLen] = '\0';
+
+  time_t now = time(NULL);
+  struct tm *tm_info = localtime(&now);
+  char ts[16] = "00:00";
+  if (tm_info)
+    strftime(ts, sizeof(ts), "%H:%M", tm_info);
+
   char formatted[MSG_SIZE * 2];
-  snprintf(formatted, sizeof(formatted), "%s[DM] << %s%s\n", COLOR_CYAN,
-           (char *)decrypted, COLOR_RESET);
+  snprintf(formatted, sizeof(formatted), "%s[%s] %s%s\n", COLOR_CYAN,
+           ts, (char *)decrypted, COLOR_RESET);
   print(formatted);
   historyAppend(g_dm.peerToken, false, (char *)decrypted);
   return true;
@@ -195,7 +218,7 @@ static bool encryptAndSendRoom(const char *message, size_t msgLen) {
 }
 
 static bool decryptAndDisplayRoom(const char *encryptedData,
-                                  const char *username) {
+                                   const char *username) {
   unsigned char decoded[MSG_SIZE];
   int decodedLen = decodeBase64(encryptedData, decoded);
   if (decodedLen <= 0)
@@ -206,13 +229,20 @@ static bool decryptAndDisplayRoom(const char *encryptedData,
   if (decryptedLen <= 0)
     return false;
   decrypted[decryptedLen] = '\0';
+
+  time_t now = time(NULL);
+  struct tm *tm_info = localtime(&now);
+  char ts[16] = "00:00";
+  if (tm_info)
+    strftime(ts, sizeof(ts), "%H:%M", tm_info);
+
   char formatted[MSG_SIZE * 2];
   if (username[0])
-    snprintf(formatted, sizeof(formatted), "%s<< %s: %s%s\n", COLOR_CYAN,
-             username, decrypted, COLOR_RESET);
+    snprintf(formatted, sizeof(formatted), "%s[%s] %s: %s%s\n", COLOR_CYAN,
+             ts, username, decrypted, COLOR_RESET);
   else
-    snprintf(formatted, sizeof(formatted), "%s<< %s%s\n", COLOR_CYAN, decrypted,
-             COLOR_RESET);
+    snprintf(formatted, sizeof(formatted), "%s[%s] %s%s\n", COLOR_CYAN, ts,
+             decrypted, COLOR_RESET);
   print(formatted);
   return true;
 }
@@ -247,30 +277,50 @@ static void handleIncomingDm(const char *frame) {
       printMessage(COLOR_RED, "[!] ", "DM_REQ: ECDH failed\n");
       return;
     }
-    clearDmSession();
-    g_dm.active = true;
-    snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", senderToken);
-    memcpy(g_dm.key, sharedKey, 32);
-    eraseInputLine();
+    g_dm.pending = true;
+    snprintf(g_dm.pendingToken, sizeof(g_dm.pendingToken), "%s", senderToken);
+    memcpy(g_dm.pendingKey, sharedKey, 32);
+    char shortToken[17];
+    snprintf(shortToken, sizeof(shortToken), "%.16s", senderToken);
+    char notifyMsg[MSG_SIZE];
     if (historyExists(senderToken))
-      printMessage(COLOR_YELLOW, "", "[*] DM session (continuing previous)\n");
+      snprintf(notifyMsg, sizeof(notifyMsg),
+              "[*] DM from %.16s... (use /dm %.64s to reply)\n",
+              shortToken, senderToken);
     else
-      printMessage(COLOR_YELLOW, "", "[*] DM session requested\n");
+      snprintf(notifyMsg, sizeof(notifyMsg),
+              "[*] DM from %.16s... (use /dm %.64s to reply)\n",
+              shortToken, senderToken);
+    printMessage(COLOR_YELLOW, "", notifyMsg);
     redrawInputLine();
     return;
   }
 
   if (strncmp(payload, "ENC:", 4) == 0) {
-    if (!g_dm.active ||
-        strncmp(g_dm.peerToken, senderToken, TOKEN_HEX_LEN) != 0) {
+    if (g_dm.active &&
+        strncmp(g_dm.peerToken, senderToken, TOKEN_HEX_LEN) == 0) {
       eraseInputLine();
-      printMessage(COLOR_RED, "", "[!] Encrypted DM from unknown session\n");
+      if (!decryptAndDisplayDm(payload + 4))
+        printMessage(COLOR_RED, "[!] ", "Failed to decrypt DM\n");
+      redrawInputLine();
+      return;
+    }
+    if (g_dm.pending &&
+        strncmp(g_dm.pendingToken, senderToken, TOKEN_HEX_LEN) == 0) {
+      g_dm.active = true;
+      g_dm.pending = false;
+      snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", g_dm.pendingToken);
+      memcpy(g_dm.key, g_dm.pendingKey, 32);
+      memset(g_dm.pendingKey, 0, sizeof(g_dm.pendingKey));
+      eraseInputLine();
+      printMessage(COLOR_YELLOW, "", "[*] DM session resumed\n");
+      if (!decryptAndDisplayDm(payload + 4))
+        printMessage(COLOR_RED, "[!] ", "Failed to decrypt DM\n");
       redrawInputLine();
       return;
     }
     eraseInputLine();
-    if (!decryptAndDisplayDm(payload + 4))
-      printMessage(COLOR_RED, "[!] ", "Failed to decrypt DM\n");
+    printMessage(COLOR_RED, "", "[!] Encrypted DM from unknown session\n");
     redrawInputLine();
     return;
   }
@@ -347,6 +397,10 @@ static void displayIncomingMessage(char *buffer) {
 
   clientLog("recv: %.80s", buffer);
   eraseInputLine();
+  pthread_mutex_lock(&g_input.mutex);
+  g_input.buffer[0] = '\0';
+  g_input.length = 0;
+  pthread_mutex_unlock(&g_input.mutex);
 
   if (isDm) {
     handleIncomingDm(buffer);
@@ -379,13 +433,20 @@ static void displayIncomingMessage(char *buffer) {
       size_t tlen = strlen(text);
       while (tlen > 0 && (text[tlen - 1] == '\n' || text[tlen - 1] == '\r'))
         text[--tlen] = '\0';
+
+      time_t now = time(NULL);
+      struct tm *tm_info = localtime(&now);
+      char ts[16] = "00:00";
+      if (tm_info)
+        strftime(ts, sizeof(ts), "%H:%M", tm_info);
+
       char formatted[MSG_SIZE * 2];
       if (username[0])
-        snprintf(formatted, sizeof(formatted), "%s<< %s: %s%s\n", COLOR_CYAN,
-                 username, text, COLOR_RESET);
+        snprintf(formatted, sizeof(formatted), "%s[%s] %s: %s%s\n", COLOR_CYAN,
+                 ts, username, text, COLOR_RESET);
       else
-        snprintf(formatted, sizeof(formatted), "%s<< %s%s\n", COLOR_CYAN, text,
-                 COLOR_RESET);
+        snprintf(formatted, sizeof(formatted), "%s[%s] %s%s\n", COLOR_CYAN, ts,
+                 text, COLOR_RESET);
       print(formatted);
     }
   } else if (isErr) {
@@ -611,9 +672,15 @@ static bool processInput(char *message, size_t msgLen) {
       return true;
     historyAppend(g_dm.peerToken, true, message);
 
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char ts[16] = "00:00";
+    if (tm_info)
+      strftime(ts, sizeof(ts), "%H:%M", tm_info);
+
     char formatted[MSG_SIZE * 2];
-    snprintf(formatted, sizeof(formatted), "%s[DM] >> %s%s\n", COLOR_GREEN,
-             message, COLOR_RESET);
+    snprintf(formatted, sizeof(formatted), "%s[%s] %-30s [DM]%s\n", COLOR_GREEN,
+             ts, message, COLOR_RESET);
     eraseInputLine();
     print(formatted);
 
@@ -640,6 +707,25 @@ static bool processInput(char *message, size_t msgLen) {
     snprintf(toSend, sizeof(toSend), "%s\n", message);
     sendToServer(toSend);
   }
+
+  // Display sent room message
+  time_t now = time(NULL);
+  struct tm *tm_info = localtime(&now);
+  char ts[16] = "00:00";
+  if (tm_info)
+    strftime(ts, sizeof(ts), "%H:%M", tm_info);
+
+  char sentFormatted[MSG_SIZE * 2];
+  snprintf(sentFormatted, sizeof(sentFormatted), "%s[%s] %-30s [#%s]%s\n",
+           COLOR_GREEN, ts, message, g_currentRoom, COLOR_RESET);
+  eraseInputLine();
+  print(sentFormatted);
+
+  pthread_mutex_lock(&g_input.mutex);
+  g_input.buffer[0] = '\0';
+  g_input.length = 0;
+  pthread_mutex_unlock(&g_input.mutex);
+
   return true;
 }
 
