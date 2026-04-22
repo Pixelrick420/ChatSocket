@@ -228,6 +228,9 @@ static void handleIncomingDm(const char *frame) {
     senderToken[TOKEN_HEX_LEN] = '\0';
     const char *payload = p + TOKEN_HEX_LEN + 1;
 
+    if (g_dm.active || g_dm.pending) {
+        return;
+    }
     if (strncmp(payload, "DM_REQ:", 7) == 0) {
         const char *peerPubHex = payload + 7;
         char trimmed[TOKEN_STR_SIZE];
@@ -1240,6 +1243,13 @@ static void handleKeyInput(int key) {
                 return;
             }
             historyAppend(g_dm.peerToken, true, msg);
+            time_t now = time(NULL);
+            struct tm *tm_info = localtime(&now);
+            char ts[16] = "00:00";
+            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
+            char userMsg[MSG_SIZE * 2];
+            snprintf(userMsg, sizeof(userMsg), "[%s] %s: %s", ts, g_username, msg);
+            addMessage(userMsg);
             g_expectServerResponse = true;
             return;
         }
