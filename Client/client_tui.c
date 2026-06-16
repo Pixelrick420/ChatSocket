@@ -20,7 +20,9 @@
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 2077
 #define MAX_MESSAGES 1000
-#define SIDEBAR_WIDTH 32
+#define SIDEBAR_WIDTH 34
+#define UI_RENDER_LINES 256
+#define UI_RENDER_LINE_MAX 512
 
 typedef enum {
   UI_MSG_CHAT,
@@ -64,6 +66,7 @@ typedef struct {
 
 static FILE *g_logFile = NULL;
 static char g_logPath[512] = {0};
+static char g_serverLabel[128] = "offline";
 static SocketHandle g_socketFD = INVALID_SOCKET_HANDLE;
 static SSL *g_ssl = NULL;
 static Identity g_identity = {0};
@@ -177,6 +180,29 @@ static void uiDrawText(int row, int col, int fgR, int fgG, int fgB, int bgR,
   uiRgbFg(fgR, fgG, fgB);
   fputs(text, stdout);
   print(UI_RESET);
+}
+
+static void uiDrawTextRight(int row, int rightCol, int fgR, int fgG, int fgB,
+                            int bgR, int bgG, int bgB, const char *text) {
+  int width = (int)strlen(text);
+  int start = rightCol - width + 1;
+  if (start < 1)
+    start = 1;
+  uiDrawText(row, start, fgR, fgG, fgB, bgR, bgG, bgB, text);
+}
+
+static void uiDrawSectionLabel(int row, int col, int width, const char *title,
+                               const char *value) {
+  int panelR = 24, panelG = 29, panelB = 36;
+  char line[128];
+  if (value && value[0]) {
+    snprintf(line, sizeof(line), "%s %s", title, value);
+  } else {
+    snprintf(line, sizeof(line), "%s", title);
+  }
+  char padded[128];
+  snprintf(padded, sizeof(padded), "%-*.*s", width, width, line);
+  uiDrawText(row, col, 166, 191, 255, panelR, panelG, panelB, padded);
 }
 
 static void uiDrawBox(int x, int y, int w, int h, const char *title) {
@@ -319,6 +345,125 @@ static void rememberDmToken(const char *token) {
   }
 }
 
+static int findDmByToken(const char *token) {
+  if (!token || !token[0])
+    return -1;
+
+  for (int i = 0; i < g_dmCount; i++) {
+    if (strcmp(g_dmList[i], token) == 0)
+      return i;
+  }
+  return -1;
+}
+
+static void formatDmLabel(const char *token, char *out, size_t outSize) {
+  if (!out || outSize == 0) {
+    return;
+  }
+
+  int idx = findDmByToken(token);
+  if (idx >= 0 && g_dmNick[idx][0]) {
+    snprintf(out, outSize, "%s", g_dmNick[idx]);
+    return;
+  }
+
+  if (token && token[0]) {
+    snprintf(out, outSize, "%.12s", token);
+    return;
+  }
+
+  snprintf(out, outSize, "none");
+}
+
+static void formatContextLabel(char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  if (g_input.readingRoomSecret) {
+    snprintf(out, outSize, "Unlock #%s", g_room.pendingName[0] ? g_room.pendingName : "room");
+    return;
+  }
+
+  if (g_dm.active) {
+    char dmLabel[64];
+    formatDmLabel(g_dm.peerToken, dmLabel, sizeof(dmLabel));
+    snprintf(out, outSize, "DM %s", dmLabel);
+    return;
+  }
+
+  if (g_room.active) {
+    snprintf(out, outSize, "#%s", g_room.currentName);
+    return;
+  }
+
+  snprintf(out, outSize, "Lobby");
+}
+
+static void formatSecurityLabel(char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  if (g_dm.active) {
+    snprintf(out, outSize, "E2E DM");
+  } else if (g_room.active && g_room.protectedRoom) {
+    snprintf(out, outSize, "E2E ROOM");
+  } else if (g_room.active) {
+    snprintf(out, outSize, "OPEN ROOM");
+  } else {
+    snprintf(out, outSize, "PINNED TLS");
+  }
+}
+
+static int wrapTextToWidth(const char *text, int width,
+                           char out[][UI_RENDER_LINE_MAX], int maxLines) {
+  if (!text || !text[0] || width <= 0 || maxLines <= 0)
+    return 0;
+
+  int count = 0;
+  const char *cursor = text;
+
+  while (*cursor && count < maxLines) {
+    while (*cursor == ' ')
+      cursor++;
+
+    if (*cursor == '\n') {
+      out[count][0] = '\0';
+      count++;
+      cursor++;
+      continue;
+    }
+
+    int consumed = 0;
+    int split = -1;
+    while (cursor[consumed] && cursor[consumed] != '\n' && consumed < width) {
+      if (cursor[consumed] == ' ')
+        split = consumed;
+      consumed++;
+    }
+
+    if (!cursor[consumed] || cursor[consumed] == '\n') {
+      int len = consumed;
+      while (len > 0 && cursor[len - 1] == ' ')
+        len--;
+      snprintf(out[count], UI_RENDER_LINE_MAX, "%.*s", len, cursor);
+      count++;
+      cursor += consumed;
+      if (*cursor == '\n')
+        cursor++;
+      continue;
+    }
+
+    int len = (split > 0) ? split : consumed;
+    while (len > 0 && cursor[len - 1] == ' ')
+      len--;
+    snprintf(out[count], UI_RENDER_LINE_MAX, "%.*s", len, cursor);
+    count++;
+    cursor += (split > 0) ? split + 1 : consumed;
+  }
+
+  return count;
+}
+
 static int findDmByReference(const char *input) {
   if (!input || !input[0])
     return -1;
@@ -451,7 +596,9 @@ static void showDmMessage(const char *senderToken, const char *payload) {
   decrypted[plen] = '\0';
   historyAppend(senderToken, false, (char *)decrypted);
   rememberDmToken(senderToken);
-  addTimestamped(UI_MSG_CHAT, senderToken, (char *)decrypted);
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  addTimestamped(UI_MSG_CHAT, dmLabel, (char *)decrypted);
 }
 
 static void finalizeRoomSecretEntry(void) {
@@ -572,10 +719,6 @@ static void displayIncomingMessage(char *buffer) {
     return;
 
   clientLog("recv: %.160s", buffer);
-  pthread_mutex_lock(&g_stateMutex);
-  g_input.buffer[0] = '\0';
-  g_input.length = 0;
-  pthread_mutex_unlock(&g_stateMutex);
 
   if (strcmp(parts[0], "ERR") == 0 && partCount >= 2) {
     addMessage(UI_MSG_ERROR, "[!] %s", parts[1]);
@@ -666,107 +809,215 @@ static void *receiveThread(void *arg) {
 static void uiDrawMessages(int x, int y, int w, int h) {
   int panelR = 24, panelG = 29, panelB = 36;
   int visible = h - 2;
-  int maxScroll = g_messageCount > visible ? g_messageCount - visible : 0;
+  int contentW = w - 4;
+  if (visible <= 0 || contentW <= 0)
+    return;
+
+  int totalLines = 0;
+  char wrapped[64][UI_RENDER_LINE_MAX];
+  for (int i = 0; i < g_messageCount; i++) {
+    int wrappedCount = wrapTextToWidth(g_messages[i].text, contentW, wrapped,
+                                       (int)(sizeof(wrapped) / sizeof(wrapped[0])));
+    totalLines += (wrappedCount > 0) ? wrappedCount : 1;
+  }
+
+  int maxScroll = totalLines > visible ? totalLines - visible : 0;
   if (g_messageScroll > maxScroll)
     g_messageScroll = maxScroll;
   if (g_messageScroll < 0)
     g_messageScroll = 0;
 
-  int start = g_messageCount > visible ? g_messageCount - visible - g_messageScroll : 0;
-  if (start < 0)
-    start = 0;
+  char rendered[UI_RENDER_LINES][UI_RENDER_LINE_MAX];
+  UiMessageTone tones[UI_RENDER_LINES];
+  for (int row = 0; row < visible && row < UI_RENDER_LINES; row++) {
+    rendered[row][0] = '\0';
+    tones[row] = UI_MSG_CHAT;
+  }
+
+  int skip = g_messageScroll;
+  int filled = 0;
+  for (int msg = g_messageCount - 1; msg >= 0 && filled < visible; msg--) {
+    int wrappedCount = wrapTextToWidth(g_messages[msg].text, contentW, wrapped,
+                                       (int)(sizeof(wrapped) / sizeof(wrapped[0])));
+    if (wrappedCount == 0) {
+      snprintf(wrapped[0], sizeof(wrapped[0]), "%s", "");
+      wrappedCount = 1;
+    }
+
+    for (int part = wrappedCount - 1; part >= 0 && filled < visible; part--) {
+      if (skip > 0) {
+        skip--;
+        continue;
+      }
+      int slot = visible - 1 - filled;
+      if (slot >= 0 && slot < UI_RENDER_LINES) {
+        snprintf(rendered[slot], sizeof(rendered[slot]), "%s", wrapped[part]);
+        tones[slot] = g_messages[msg].tone;
+      }
+      filled++;
+    }
+  }
+
+  if (filled == 0) {
+    snprintf(rendered[visible / 2], sizeof(rendered[visible / 2]),
+             "No activity yet. Join a room or start a DM.");
+    tones[visible / 2] = UI_MSG_INFO;
+  }
 
   for (int row = 0; row < visible; row++) {
-    int idx = start + row;
-    char line[MSG_SIZE * 2];
-    if (idx < g_messageCount) {
-      snprintf(line, sizeof(line), "%.*s", w - 4, g_messages[idx].text);
-    } else {
-      line[0] = '\0';
-    }
-
     int fgR = 191, fgG = 203, fgB = 214;
-    if (idx < g_messageCount) {
-      switch (g_messages[idx].tone) {
-      case UI_MSG_INFO:
-        fgR = 233; fgG = 196; fgB = 106;
-        break;
-      case UI_MSG_ERROR:
-        fgR = 239; fgG = 108; fgB = 96;
-        break;
-      case UI_MSG_SELF:
-        fgR = 152; fgG = 195; fgB = 121;
-        break;
-      case UI_MSG_CHAT:
-      default:
-        fgR = 191; fgG = 203; fgB = 214;
-        break;
-      }
+    switch (tones[row]) {
+    case UI_MSG_INFO:
+      fgR = 233; fgG = 196; fgB = 106;
+      break;
+    case UI_MSG_ERROR:
+      fgR = 239; fgG = 108; fgB = 96;
+      break;
+    case UI_MSG_SELF:
+      fgR = 152; fgG = 195; fgB = 121;
+      break;
+    case UI_MSG_CHAT:
+    default:
+      fgR = 191; fgG = 203; fgB = 214;
+      break;
     }
 
-    char padded[MSG_SIZE * 2];
-    snprintf(padded, sizeof(padded), "%-*s", w - 4, line);
+    char padded[UI_RENDER_LINE_MAX];
+    snprintf(padded, sizeof(padded), "%-*.*s", contentW, contentW, rendered[row]);
     uiDrawText(y + 1 + row, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, padded);
   }
 }
 
 static void uiDrawSidebar(int x, int y, int w, int h) {
   int panelR = 24, panelG = 29, panelB = 36;
-  int fgR = 166, fgG = 191, fgB = 255;
+  int contentW = w - 4;
   int row = y + 1;
+  int endRow = y + h - 1;
 
-  if (row < y + h - 1) {
-    uiDrawText(row++, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, "Rooms");
+  char context[64];
+  char security[64];
+  formatContextLabel(context, sizeof(context));
+  formatSecurityLabel(security, sizeof(security));
+
+  uiDrawSectionLabel(row++, x + 2, contentW, "SESSION", NULL);
+  if (row < endRow) {
+    char line[128];
+    snprintf(line, sizeof(line), "mode      %s", context);
+    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
   }
-  for (int i = 0; i < g_roomCount && row < y + h - 1; i++) {
-    char line[64];
-    snprintf(line, sizeof(line), "%s%s [%s]",
-             strcmp(g_rooms[i], g_room.currentName) == 0 ? "* " : "  ", g_rooms[i],
-             g_roomTypes[i][0] ? g_roomTypes[i] : "?");
-    char padded[64];
-    snprintf(padded, sizeof(padded), "%-*.*s", w - 4, w - 4, line);
-    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, padded);
+  if (row < endRow) {
+    char line[128];
+    snprintf(line, sizeof(line), "security  %s", security);
+    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
+  }
+  if (row < endRow) {
+    char line[128];
+    snprintf(line, sizeof(line), "identity  %s", g_username);
+    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
+  }
+  if (row < endRow) {
+    char line[128];
+    snprintf(line, sizeof(line), "relay     %.20s", g_serverLabel);
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB, line);
   }
 
-  if (row < y + h - 2) {
+  if (row < endRow)
     row++;
-    uiDrawText(row++, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, "DMs");
+
+  char roomsCount[32];
+  snprintf(roomsCount, sizeof(roomsCount), "(%d)", g_roomCount);
+  if (row < endRow)
+    uiDrawSectionLabel(row++, x + 2, contentW, "ROOMS", roomsCount);
+  if (g_roomCount == 0 && row < endRow) {
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+               "No rooms cached yet");
   }
-  for (int i = 0; i < g_dmCount && row < y + h - 1; i++) {
-    char line[64];
-    if (g_dmNick[i][0])
-      snprintf(line, sizeof(line), "%s%s", strcmp(g_dmList[i], g_dm.peerToken) == 0 ? "* " : "  ", g_dmNick[i]);
-    else
-      snprintf(line, sizeof(line), "%s%.12s", strcmp(g_dmList[i], g_dm.peerToken) == 0 ? "* " : "  ", g_dmList[i]);
-    char padded[64];
-    snprintf(padded, sizeof(padded), "%-*.*s", w - 4, w - 4, line);
-    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, padded);
+  for (int i = 0; i < g_roomCount && row < endRow; i++) {
+    char line[128];
+    snprintf(line, sizeof(line), "%c %-18.18s [%c]",
+             strcmp(g_rooms[i], g_room.currentName) == 0 ? '>' : ' ',
+             g_rooms[i], strcmp(g_roomTypes[i], "PROTECTED") == 0 ? 'P' : 'O');
+    uiDrawText(row++, x + 2,
+               strcmp(g_rooms[i], g_room.currentName) == 0 ? 233 : 191,
+               strcmp(g_rooms[i], g_room.currentName) == 0 ? 237 : 203,
+               strcmp(g_rooms[i], g_room.currentName) == 0 ? 243 : 214,
+               panelR, panelG, panelB, line);
   }
 
-  if (row < y + h - 3)
+  if (row < endRow)
     row++;
-  if (row < y + h - 2)
+
+  char dmCountText[32];
+  snprintf(dmCountText, sizeof(dmCountText), "(%d)", g_dmCount);
+  if (row < endRow)
+    uiDrawSectionLabel(row++, x + 2, contentW, "DMS", dmCountText);
+  if (g_dmCount == 0 && row < endRow) {
     uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
-               "Up/Down scroll");
-  if (row < y + h - 2)
+               "No DM history yet");
+  }
+  for (int i = 0; i < g_dmCount && row < endRow; i++) {
+    char dmLabel[64];
+    formatDmLabel(g_dmList[i], dmLabel, sizeof(dmLabel));
+    char line[128];
+    snprintf(line, sizeof(line), "%c %-20.20s",
+             strcmp(g_dmList[i], g_dm.peerToken) == 0 ? '>' : ' ', dmLabel);
+    uiDrawText(row++, x + 2,
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 152 : 191,
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 195 : 203,
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 121 : 214,
+               panelR, panelG, panelB, line);
+  }
+
+  if (row < endRow)
+    row++;
+  if (row < endRow)
+    uiDrawSectionLabel(row++, x + 2, contentW, "HINTS", NULL);
+  if (row < endRow)
     uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
-               "F1 or ? help");
+               "Enter send or submit");
+  if (row < endRow)
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+               "Up/Down scroll | PgUp/PgDn jump");
+  if (row < endRow)
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+               "? toggles help");
 }
 
 static void uiDrawInput(int x, int y, int w, int h) {
-  (void)h;
   int panelR = 18, panelG = 23, panelB = 30;
-  char prompt[64];
-  if (g_input.readingRoomSecret)
-    snprintf(prompt, sizeof(prompt), "room secret");
-  else if (g_dm.active)
-    snprintf(prompt, sizeof(prompt), "dm %.8s", g_dm.peerToken);
-  else if (g_room.active)
-    snprintf(prompt, sizeof(prompt), "room %s", g_room.currentName);
-  else
-    snprintf(prompt, sizeof(prompt), "lobby");
+  if (h < 5)
+    return;
 
+  char prompt[96];
+  char hint[160];
+  if (g_input.readingRoomSecret) {
+    snprintf(prompt, sizeof(prompt), "Submit room secret for #%s",
+             g_room.pendingName[0] ? g_room.pendingName : "room");
+    snprintf(hint, sizeof(hint),
+             "The secret is masked locally. Only a verifier is sent to the relay.");
+  } else if (g_dm.active) {
+    char dmLabel[64];
+    formatDmLabel(g_dm.peerToken, dmLabel, sizeof(dmLabel));
+    snprintf(prompt, sizeof(prompt), "Message %s", dmLabel);
+    snprintf(hint, sizeof(hint), "Secure DM is live. Use /dmleave to close it.");
+  } else if (g_room.active) {
+    snprintf(prompt, sizeof(prompt), "Message #%s", g_room.currentName);
+    snprintf(hint, sizeof(hint), "%s",
+             g_room.protectedRoom
+                 ? "Protected room messages are encrypted before they leave the client."
+                 : "Open room messages are readable by the relay.");
+  } else {
+    snprintf(prompt, sizeof(prompt), "Lobby command");
+    snprintf(hint, sizeof(hint), "Try /rooms, /create <room>, /enter <room>, /dm, or /help.");
+  }
+
+  char countText[32];
+  size_t currentLen =
+      g_input.readingRoomSecret ? g_input.roomSecretLen : g_input.length;
+  snprintf(countText, sizeof(countText), "%zu/%d", currentLen, MSG_SIZE - 1);
   uiDrawText(y + 1, x + 2, 166, 191, 255, panelR, panelG, panelB, prompt);
+  uiDrawTextRight(y + 1, x + w - 3, 127, 140, 156, panelR, panelG, panelB,
+                  countText);
 
   char content[MSG_SIZE];
   if (g_input.readingRoomSecret) {
@@ -779,74 +1030,132 @@ static void uiDrawInput(int x, int y, int w, int h) {
     snprintf(content, sizeof(content), "%s", g_input.buffer);
   }
 
-  char clipped[MSG_SIZE];
+  if (!content[0]) {
+    snprintf(content, sizeof(content), "%s",
+             g_input.readingRoomSecret ? "" : "Type a message or command here");
+  }
+
+  char clipped[UI_RENDER_LINE_MAX];
   snprintf(clipped, sizeof(clipped), "%-*.*s", w - 4, w - 4, content);
-  uiDrawText(y + 2, x + 2, 233, 237, 243, panelR, panelG, panelB, clipped);
+  uiDrawText(y + 2, x + 2,
+             g_input.readingRoomSecret || g_input.buffer[0] ? 233 : 127,
+             g_input.readingRoomSecret || g_input.buffer[0] ? 237 : 140,
+             g_input.readingRoomSecret || g_input.buffer[0] ? 243 : 156,
+             panelR, panelG, panelB, clipped);
+
+  char hintLine[UI_RENDER_LINE_MAX];
+  snprintf(hintLine, sizeof(hintLine), "%-*.*s", w - 4, w - 4, hint);
+  uiDrawText(y + 3, x + 2, 127, 140, 156, panelR, panelG, panelB, hintLine);
 }
 
 static void uiDrawHelp(int rows, int cols) {
-  int w = cols > 80 ? 70 : cols - 8;
-  int h = 14;
+  int w = cols > 100 ? 82 : cols - 8;
+  int h = 17;
   int x = (cols - w) / 2;
   int y = (rows - h) / 2;
   int panelR = 24, panelG = 29, panelB = 36;
 
   uiDrawBox(x, y, w, h, "Help");
-  uiDrawText(y + 2, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/name  /rooms  /create  /enter  /leave");
+  uiDrawSectionLabel(y + 2, x + 2, w - 4, "ROOMS", NULL);
   uiDrawText(y + 3, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/dm  /dmleave  /list  /nick  /token");
+             "/rooms   /create <room>   /create <room> -p <secret>");
   uiDrawText(y + 4, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/create <room> -p <secret> creates a protected room");
-  uiDrawText(y + 5, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "Messages stay end-to-end encrypted for protected rooms and DMs");
-  uiDrawText(y + 7, x + 2, 166, 191, 255, panelR, panelG, panelB,
-             "Scroll: Up/Down");
-  uiDrawText(y + 8, x + 2, 166, 191, 255, panelR, panelG, panelB,
-             "Toggle help: F1 or ?");
-  uiDrawText(y + 10, x + 2, 127, 140, 156, panelR, panelG, panelB,
-             "Press any help key again to close");
+             "/enter <room>   /leave");
+  uiDrawSectionLabel(y + 6, x + 2, w - 4, "DIRECT MESSAGES", NULL);
+  uiDrawText(y + 7, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "/dm <token|nick|prefix>   /dmleave   /list   /nick <target> <name>");
+  uiDrawSectionLabel(y + 9, x + 2, w - 4, "IDENTITY", NULL);
+  uiDrawText(y + 10, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "/name <name>   /token   /help   /exit");
+  uiDrawSectionLabel(y + 12, x + 2, w - 4, "KEYS", NULL);
+  uiDrawText(y + 13, x + 2, 166, 191, 255, panelR, panelG, panelB,
+             "Enter sends or submits   Up/Down scroll   PgUp/PgDn jump   ? toggles help");
+  uiDrawText(y + 15, x + 2, 127, 140, 156, panelR, panelG, panelB,
+             "Protected rooms and DMs stay encrypted on the client. TLS fingerprints are pinned on first use.");
 }
 
 static void renderUi(void) {
   int rows, cols;
   uiGetSize(&rows, &cols);
-  if (rows < 16 || cols < 70) {
-    uiMove(1, 1);
-    print("Terminal too small. Resize to at least 70x16.");
+  if (rows < 14 || cols < 60) {
+    uiClearScreen();
+    uiFillLine(1, cols, 18, 23, 30);
+    uiFillLine(2, cols, 22, 27, 34);
+    uiDrawText(1, 2, 233, 237, 243, 18, 23, 30, "SocketChat");
+    uiDrawText(2, 2, 127, 140, 156, 22, 27, 34,
+               "Resize to at least 60x14 for the compact layout.");
     fflush(stdout);
     return;
   }
 
-  int sidebar = SIDEBAR_WIDTH;
-  int messageW = cols - sidebar - 3;
-  int messageH = rows - 5;
+  bool compact = rows < 20 || cols < 82;
+  int topH = compact ? 1 : 2;
+  int inputH = compact ? 4 : 5;
+  int sidebar = compact ? 0 : (cols >= 120 ? SIDEBAR_WIDTH + 2 : SIDEBAR_WIDTH);
+  int messageW = compact ? cols - 1 : cols - sidebar - 3;
+  int messageH = rows - topH - inputH;
+  int messageY = topH + 1;
+  int inputY = rows - inputH + 1;
+  int connected = g_input.connected ? 1 : 0;
 
   uiClearScreen();
   uiFillLine(1, cols, 18, 23, 30);
+  if (!compact)
+    uiFillLine(2, cols, 22, 27, 34);
+
+  char context[64];
+  char security[64];
+  formatContextLabel(context, sizeof(context));
+  formatSecurityLabel(security, sizeof(security));
+
   uiDrawText(1, 2, 233, 237, 243, 18, 23, 30, "SocketChat");
-  if (g_dm.active) {
-    char ctx[64];
-    snprintf(ctx, sizeof(ctx), "DM %.12s", g_dm.peerToken);
-    uiDrawText(1, 16, 152, 195, 121, 18, 23, 30, ctx);
-  } else if (g_room.active) {
-    char ctx[64];
-    snprintf(ctx, sizeof(ctx), "#%s", g_room.currentName);
-    uiDrawText(1, 16, 152, 195, 121, 18, 23, 30, ctx);
+  char identityText[96];
+  snprintf(identityText, sizeof(identityText), "%s  %.8s...", g_username,
+           g_identity.token);
+
+  if (compact) {
+    char compactStatus[160];
+    snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s | ? help",
+             connected ? "connected" : "offline", context, security);
+    uiDrawText(1, 15, 152, 195, 121, 18, 23, 30, compactStatus);
+    uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
+
+    uiDrawBox(1, messageY, messageW, messageH, "Activity");
+    uiDrawBox(1, inputY, cols - 1, inputH, "Composer");
+    uiDrawMessages(1, messageY, messageW, messageH);
   } else {
-    uiDrawText(1, 16, 233, 196, 106, 18, 23, 30, "Lobby");
+    uiDrawText(1, 15, 152, 195, 121, 18, 23, 30, context);
+    uiDrawText(1, 34, 233, 196, 106, 18, 23, 30, security);
+    uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
+
+    char statusLine[256];
+    snprintf(statusLine, sizeof(statusLine),
+             "%s | relay %s | %d msgs | %d rooms | %d dms | ? help",
+             connected ? "connected" : "offline", g_serverLabel, g_messageCount,
+             g_roomCount, g_dmCount);
+    uiDrawText(2, 2, 127, 140, 156, 22, 27, 34, statusLine);
+
+    uiDrawBox(1, messageY, messageW, messageH, "Activity");
+    uiDrawBox(messageW + 2, messageY, sidebar, messageH, "Navigator");
+    uiDrawBox(1, inputY, cols - 1, inputH, "Composer");
+    uiDrawMessages(1, messageY, messageW, messageH);
+    uiDrawSidebar(messageW + 2, messageY, sidebar, messageH);
   }
-  char tokenText[32];
-  snprintf(tokenText, sizeof(tokenText), "%.8s...", g_identity.token);
-  uiDrawText(1, cols - 16, 127, 140, 156, 18, 23, 30, tokenText);
 
-  uiDrawBox(1, 2, messageW, messageH, "Conversation");
-  uiDrawBox(messageW + 2, 2, sidebar, messageH, "Sidebar");
-  uiDrawBox(1, rows - 2, cols - 1, 3, "Command");
+  uiDrawInput(1, inputY, cols - 1, inputH);
 
-  uiDrawMessages(1, 2, messageW, messageH);
-  uiDrawSidebar(messageW + 2, 2, sidebar, messageH);
-  uiDrawInput(1, rows - 2, cols - 1, 3);
+  int totalLines = 0;
+  char wrapped[64][UI_RENDER_LINE_MAX];
+  for (int i = 0; i < g_messageCount; i++) {
+    int wrappedCount = wrapTextToWidth(g_messages[i].text, messageW - 4, wrapped,
+                                       (int)(sizeof(wrapped) / sizeof(wrapped[0])));
+    totalLines += (wrappedCount > 0) ? wrappedCount : 1;
+  }
+  int maxScroll = totalLines > (messageH - 2) ? totalLines - (messageH - 2) : 0;
+  char scrollText[64];
+  snprintf(scrollText, sizeof(scrollText), "scroll %d/%d", g_messageScroll,
+           maxScroll);
+  uiDrawTextRight(messageY, messageW - 1, 127, 140, 156, 24, 29, 36, scrollText);
 
   if (g_showHelp)
     uiDrawHelp(rows, cols);
@@ -1246,6 +1555,7 @@ static bool connectToServer(const char *ip, int port) {
 
   char serverLabel[128];
   snprintf(serverLabel, sizeof(serverLabel), "%s:%d", ip, port);
+  snprintf(g_serverLabel, sizeof(g_serverLabel), "%s", serverLabel);
   if (!tlsTrustOnFirstUse(g_ssl, serverLabel)) {
     tlsFree(g_ssl);
     g_ssl = NULL;

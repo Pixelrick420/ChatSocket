@@ -97,6 +97,27 @@ static bool tokenMapLookupByFD(SocketHandle fd, char out[TOKEN_HEX_LEN + 1]) {
   return false;
 }
 
+static void setSocketTimeoutMs(SocketHandle socketFD, int timeoutMs) {
+#ifdef _WIN32
+  DWORD timeout = timeoutMs > 0 ? (DWORD)timeoutMs : 0;
+  setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout,
+             sizeof(timeout));
+  setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout,
+             sizeof(timeout));
+#else
+  struct timeval timeout;
+  if (timeoutMs <= 0) {
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+  } else {
+    timeout.tv_sec = timeoutMs / 1000;
+    timeout.tv_usec = (timeoutMs % 1000) * 1000;
+  }
+  setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(socketFD, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
+}
+
 static bool sendFrame(SocketHandle socketFD, const char *message) {
   pthread_mutex_lock(&g_context->mutex);
   SSL *ssl = sslMapGet(socketFD);
@@ -666,7 +687,9 @@ int main(void) {
       continue;
     }
 
+    setSocketTimeoutMs(client->socketFD, 5000);
     SSL *ssl = tlsServerAccept(g_sslCtx, client->socketFD);
+    setSocketTimeoutMs(client->socketFD, 0);
     if (!ssl) {
       removeClient(g_context, client->socketFD);
       platformCloseSocket(client->socketFD);
