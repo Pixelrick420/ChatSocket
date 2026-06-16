@@ -1,5 +1,7 @@
 #include "identity.h"
 
+#include <limits.h>
+
 static void bytesToHex(const unsigned char *bytes, size_t len, char *out) {
   static const char hex[] = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) {
@@ -34,43 +36,35 @@ static bool hexToBytes(const char *hex, size_t hexLen, unsigned char *out,
 }
 
 static char *identityFilePath(void) {
-  const char *home = getenv("HOME");
-  if (!home) {
-    struct passwd *pw = getpwuid(getuid());
-    if (pw)
-      home = pw->pw_dir;
-  }
-  if (!home) {
-    fprintf(stderr, "identity: cannot determine HOME directory\n");
+  char dirPath[512];
+  if (!platformGetConfigDir(dirPath, sizeof(dirPath))) {
+    fprintf(stderr, "identity: cannot determine config directory\n");
     return NULL;
   }
 
-  char dirPath[512];
-  snprintf(dirPath, sizeof(dirPath), "%s/.socketchat", home);
-  if (mkdir(dirPath, 0700) != 0 && errno != EEXIST) {
-    perror("identity: mkdir ~/.socketchat");
+  if (!platformEnsureDir(dirPath)) {
+    perror("identity: mkdir config dir");
     return NULL;
   }
 
   char *path = malloc(512);
   if (!path)
     return NULL;
-  snprintf(path, 512, "%s/.socketchat/identity.key", home);
+  snprintf(path, 512, "%s%cidentity.key", dirPath, SOCKETCHAT_PATH_SEP);
   return path;
 }
 
 static char *usernameFilePath(void) {
-  const char *home = getenv("HOME");
-  if (!home) {
-    struct passwd *pw = getpwuid(getuid());
-    if (pw)
-      home = pw->pw_dir;
-  }
-  if (!home) return NULL;
+  char dirPath[512];
+  if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
+    return NULL;
+  if (!platformEnsureDir(dirPath))
+    return NULL;
 
   char *path = malloc(512);
-  if (!path) return NULL;
-  snprintf(path, 512, "%s/.socketchat/username", home);
+  if (!path)
+    return NULL;
+  snprintf(path, 512, "%s%cusername", dirPath, SOCKETCHAT_PATH_SEP);
   return path;
 }
 
@@ -130,7 +124,7 @@ bool identityLoadOrCreate(Identity *id) {
     return false;
   }
   ssize_t written = write(fd, id->priv, IDENTITY_KEY_BYTES);
-  close(fd);
+  platformCloseFd(fd);
   if (written != (ssize_t)IDENTITY_KEY_BYTES) {
     fprintf(stderr, "identity: short write to identity.key\n");
     free(path);
@@ -279,7 +273,8 @@ bool identityLoadUsername(char *username, size_t maxLen) {
     return false;
   }
 
-  if (fgets(username, maxLen, f)) {
+  int readSize = (maxLen > (size_t)INT_MAX) ? INT_MAX : (int)maxLen;
+  if (fgets(username, readSize, f)) {
     size_t len = strlen(username);
     while (len > 0 && (username[len-1] == '\n' || username[len-1] == '\r')) {
       username[--len] = '\0';
@@ -309,47 +304,69 @@ bool identitySaveUsername(const char *username) {
   return true;
 }
 
-bool identityLoadDmNicks(char nicks[50][MAX_NAME_LEN]) {
-  const char *home = getenv("HOME");
-  if (!home) return false;
+size_t identityLoadDmNickEntries(DmNickEntry *entries, size_t maxEntries) {
+  if (!entries || maxEntries == 0)
+    return 0;
+
+  char dirPath[512];
+  if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
+    return 0;
 
   char path[512];
-  snprintf(path, sizeof(path), "%s/.socketchat/dm_nicks", home);
+  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
 
   FILE *f = fopen(path, "r");
-  if (!f) return false;
+  if (!f)
+    return 0;
 
-  int count = 0;
-  char line[MAX_NAME_LEN];
-  while (fgets(line, sizeof(line), f) && count < 50) {
+  size_t count = 0;
+  char line[256];
+  while (fgets(line, sizeof(line), f) && count < maxEntries) {
     size_t len = strlen(line);
-    while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
       line[--len] = '\0';
-    }
-    if (len > 0) {
-      snprintf(nicks[count], MAX_NAME_LEN, "%s", line);
-      count++;
-    }
+    if (len == 0)
+      continue;
+
+    char *tab = strchr(line, '\t');
+    if (!tab)
+      continue;
+    *tab++ = '\0';
+
+    if (strlen(line) != TOKEN_HEX_LEN || tab[0] == '\0')
+      continue;
+
+    snprintf(entries[count].token, sizeof(entries[count].token), "%s", line);
+    snprintf(entries[count].nick, sizeof(entries[count].nick), "%s", tab);
+    count++;
   }
+
   fclose(f);
-  return count > 0;
+  return count;
 }
 
-bool identitySaveDmNicks(char nicks[50][MAX_NAME_LEN], int count) {
-  const char *home = getenv("HOME");
-  if (!home) return false;
+bool identitySaveDmNickEntries(const DmNickEntry *entries, size_t count) {
+  if (!entries)
+    return false;
+
+  char dirPath[512];
+  if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
+    return false;
+  if (!platformEnsureDir(dirPath))
+    return false;
 
   char path[512];
-  snprintf(path, sizeof(path), "%s/.socketchat/dm_nicks", home);
+  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
 
   FILE *f = fopen(path, "w");
-  if (!f) return false;
+  if (!f)
+    return false;
 
-  for (int i = 0; i < count; i++) {
-    if (nicks[i][0]) {
-      fprintf(f, "%s\n", nicks[i]);
-    }
+  for (size_t i = 0; i < count; i++) {
+    if (entries[i].token[0] && entries[i].nick[0])
+      fprintf(f, "%s\t%s\n", entries[i].token, entries[i].nick);
   }
+
   fclose(f);
   return true;
 }

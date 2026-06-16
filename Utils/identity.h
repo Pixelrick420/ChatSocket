@@ -2,19 +2,18 @@
 #ifndef IDENTITY_H
 #define IDENTITY_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <errno.h>
+#include "platform.h"
+
 #include <fcntl.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <openssl/sha.h>
-#include <pwd.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define IDENTITY_KEY_BYTES   32
 #define TOKEN_HEX_LEN        64
@@ -26,29 +25,18 @@
 #define CHALLENGE_HEX_LEN    64
 #define CHALLENGE_HEX_SIZE   65
 #define MAX_NAME_LEN         64
-#include <openssl/sha.h>
-#include <pwd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#define IDENTITY_KEY_BYTES   32
-#define TOKEN_HEX_LEN        64
-#define TOKEN_STR_SIZE       65
-#define SIG_BYTES            64
-#define SIG_HEX_LEN         128
-#define SIG_HEX_SIZE        129
-#define CHALLENGE_BYTES      32
-#define CHALLENGE_HEX_LEN    64
-#define CHALLENGE_HEX_SIZE   65
+#define MAX_DM_NICKS         50
 
 typedef struct {
     unsigned char priv[IDENTITY_KEY_BYTES];
     unsigned char pub[IDENTITY_KEY_BYTES];
     char          token[TOKEN_STR_SIZE];
 } Identity;
+
+typedef struct {
+    char token[TOKEN_STR_SIZE];
+    char nick[MAX_NAME_LEN];
+} DmNickEntry;
 
 
 bool identityLoadOrCreate(Identity *id);
@@ -67,7 +55,7 @@ bool identityEd25519PrivToX25519(const unsigned char ed25519Priv[IDENTITY_KEY_BY
 void identityPrintToken(const Identity *id);
 bool identityLoadUsername(char *username, size_t maxLen);
 bool identitySaveUsername(const char *username);
-bool identityLoadDmNicks(char nicks[50][MAX_NAME_LEN]);
-bool identitySaveDmNicks(char nicks[50][MAX_NAME_LEN], int count);
+size_t identityLoadDmNickEntries(DmNickEntry *entries, size_t maxEntries);
+bool identitySaveDmNickEntries(const DmNickEntry *entries, size_t count);
 
 #endif

@@ -101,6 +101,82 @@ out:
   return ok;
 }
 
+bool x25519GenerateKeypair(unsigned char pubOut[32], unsigned char privOut[32]) {
+  EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
+  EVP_PKEY *key = NULL;
+  bool ok = false;
+
+  if (!ctx)
+    return false;
+  if (EVP_PKEY_keygen_init(ctx) <= 0)
+    goto out;
+  if (EVP_PKEY_keygen(ctx, &key) <= 0)
+    goto out;
+
+  size_t privLen = 32;
+  size_t pubLen = 32;
+  if (EVP_PKEY_get_raw_private_key(key, privOut, &privLen) != 1 || privLen != 32)
+    goto out;
+  if (EVP_PKEY_get_raw_public_key(key, pubOut, &pubLen) != 1 || pubLen != 32)
+    goto out;
+
+  ok = true;
+
+out:
+  if (key)
+    EVP_PKEY_free(key);
+  EVP_PKEY_CTX_free(ctx);
+  return ok;
+}
+
+bool ecdhDeriveSessionKey(const unsigned char myPrivX25519[32],
+                          const unsigned char peerPubX25519[32],
+                          const char *initiatorToken,
+                          const char *responderToken,
+                          const unsigned char initiatorPub[32],
+                          const unsigned char responderPub[32],
+                          unsigned char keyOut[32]) {
+  unsigned char shared[32];
+  if (!initiatorToken || !responderToken || !initiatorPub || !responderPub)
+    return false;
+  if (!ecdhDeriveKey(myPrivX25519, peerPubX25519, shared))
+    return false;
+
+  bool ok = false;
+  EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
+  if (!kdf)
+    return false;
+  EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+  EVP_KDF_free(kdf);
+  if (!kctx)
+    return false;
+
+  unsigned char infoBuf[256];
+  int infoLen = snprintf((char *)infoBuf, sizeof(infoBuf), "socketchat-dm-v2|%s|%s|",
+                         initiatorToken, responderToken);
+  if (infoLen <= 0 || (size_t)infoLen + 64 > sizeof(infoBuf))
+    goto out;
+  memcpy(infoBuf + infoLen, initiatorPub, 32);
+  memcpy(infoBuf + infoLen + 32, responderPub, 32);
+  infoLen += 64;
+
+  static const unsigned char salt[] = "socketchat-dm-v2";
+  char digestName[] = "SHA256";
+  OSSL_PARAM params[] = {
+      OSSL_PARAM_construct_utf8_string("digest", digestName, 0),
+      OSSL_PARAM_construct_octet_string("key", shared, sizeof(shared)),
+      OSSL_PARAM_construct_octet_string("salt", (void *)salt, sizeof(salt) - 1),
+      OSSL_PARAM_construct_octet_string("info", infoBuf, (size_t)infoLen),
+      OSSL_PARAM_construct_end()};
+
+  ok = EVP_KDF_derive(kctx, keyOut, 32, params) > 0;
+
+out:
+  EVP_KDF_CTX_free(kctx);
+  memset(shared, 0, sizeof(shared));
+  return ok;
+}
+
 bool tokenToX25519PublicKey(const char *token, unsigned char x25519Out[32]) {
   if (!token || strlen(token) != TOKEN_HEX_LEN)
     return false;

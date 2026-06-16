@@ -2,1467 +2,1364 @@
 #include "../Utils/ecdh.h"
 #include "../Utils/history.h"
 #include "../Utils/identity.h"
+#include "../Utils/protocol.h"
 #include "../Utils/socketUtil.h"
 #include "../Utils/tls.h"
 
-#include <curses.h>
-#include <menu.h>
-#include <panel.h>
-#include <pthread.h>
-#include <time.h>
+#include <stdarg.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <termios.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#define PRINTF_FMT(fmtIndex, firstArg) __attribute__((format(printf, fmtIndex, firstArg)))
+#else
+#define PRINTF_FMT(fmtIndex, firstArg)
+#endif
 
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 2077
+#define MAX_MESSAGES 1000
+#define SIDEBAR_WIDTH 32
 
-#define COLOR_PAIR_MSG     1
-#define COLOR_PAIR_NOTIF  2
-#define COLOR_PAIR_ERROR  3
-#define COLOR_PAIR_PROMPT 4
-#define COLOR_PAIR_ROOM   5
-#define COLOR_PAIR_DM     6
-#define COLOR_PAIR_ACTIVE 7
+typedef enum {
+  UI_MSG_CHAT,
+  UI_MSG_INFO,
+  UI_MSG_ERROR,
+  UI_MSG_SELF
+} UiMessageTone;
+
+typedef struct {
+  char text[MSG_SIZE * 2];
+  UiMessageTone tone;
+} UiMessage;
+
+typedef struct {
+  bool active;
+  bool protectedRoom;
+  char currentName[MAX_NAME_LEN];
+  char pendingName[MAX_NAME_LEN];
+  char pendingSalt[ROOM_SALT_HEX_SIZE];
+  unsigned char key[32];
+  unsigned char pendingKey[32];
+} RoomState;
+
+typedef struct {
+  bool active;
+  bool awaitingAck;
+  char peerToken[TOKEN_STR_SIZE];
+  unsigned char key[32];
+  unsigned char pendingPriv[32];
+  unsigned char pendingPub[32];
+} DmSession;
+
+typedef struct {
+  char buffer[MSG_SIZE];
+  size_t length;
+  bool connected;
+  bool readingRoomSecret;
+  char roomSecret[MSG_SIZE];
+  size_t roomSecretLen;
+} InputState;
 
 static FILE *g_logFile = NULL;
-static char g_logPath[256] = {0};
-
-static void logOpen(void) {
-    const char *home = getenv("HOME");
-    if (!home) return;
-    pid_t pid = getpid();
-    snprintf(g_logPath, sizeof(g_logPath), "%s/.socketchat/tui_%d.log", home, pid);
-    g_logFile = fopen(g_logPath, "a");
-    if (!g_logFile) {
-        perror("log: fopen");
-        return;
-    }
-    setvbuf(g_logFile, NULL, _IOLBF, 0);
-}
-
-static void clientLog(const char *fmt, ...) {
-    if (!g_logFile) return;
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char ts[32] = "?";
-    if (t) strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", t);
-    fprintf(g_logFile, "[%s] ", ts);
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(g_logFile, fmt, ap);
-    va_end(ap);
-    if (fmt[strlen(fmt) - 1] != '\n') fputc('\n', g_logFile);
-}
-
-static int g_socketFD = -1;
+static char g_logPath[512] = {0};
+static SocketHandle g_socketFD = INVALID_SOCKET_HANDLE;
 static SSL *g_ssl = NULL;
 static Identity g_identity = {0};
 static char g_username[MAX_NAME_LEN] = {0};
-
-static RoomEncryption g_encryption = {0};
-static char g_currentRoom[MAX_NAME_LEN] = {0};
-static bool g_inRoom = false;
-
-static struct {
-    char roomName[MAX_NAME_LEN];
-    unsigned char key[32];
-    bool hasKey;
-    bool pending;
-} g_pendingRoom = {0};
-
-typedef struct {
-    bool active;
-    char peerToken[TOKEN_STR_SIZE];
-    unsigned char key[32];
-    bool pending;
-    unsigned char pendingKey[32];
-    char pendingToken[TOKEN_STR_SIZE];
-} DmSession;
+static RoomState g_room = {0};
 static DmSession g_dm = {0};
+static struct termios g_origTermios;
+static pthread_mutex_t g_stateMutex = PTHREAD_MUTEX_INITIALIZER;
+static InputState g_input = {
+    .buffer = {0},
+    .length = 0,
+    .connected = true,
+    .readingRoomSecret = false,
+    .roomSecret = {0},
+    .roomSecretLen = 0,
+};
 
-static bool g_readingPassword = false;
-static char g_passwordBuffer[MSG_SIZE] = {0};
-static size_t g_passwordLen = 0;
-static bool g_waitingForRoomJoin = false;
-static bool g_expectServerResponse = false;
-
-static pthread_mutex_t g_inputMutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_connected = true;
-
-typedef struct {
-    char buffer[MSG_SIZE];
-    size_t length;
-} InputState;
-static InputState g_inputState = {{0}, 0};
-
-static WINDOW *g_msgWin = NULL;
-static WINDOW *g_sidebarWin = NULL;
-static WINDOW *g_inputWin = NULL;
-static WINDOW *g_helpWin = NULL;
-
-static int g_maxY = 0, g_maxX = 0;
-static int g_sidebarX = 0;
-
-static char g_rooms[50][MAX_NAME_LEN] = {{0}};
-static int g_roomCount = 0;
-static int g_selectedRoom = -1;
-
-static char g_dmList[50][TOKEN_STR_SIZE] = {{0}};
-static char g_dmNick[50][MAX_NAME_LEN] = {{0}};
-static int g_dmCount = 0;
-static int g_selectedDm = -1;
-
+static UiMessage g_messages[MAX_MESSAGES];
+static int g_messageCount = 0;
+static int g_messageScroll = 0;
 static bool g_showHelp = false;
+static bool g_roomsLoading = false;
+static char g_rooms[50][MAX_NAME_LEN] = {{0}};
+static char g_roomTypes[50][16] = {{0}};
+static int g_roomCount = 0;
+static char g_dmList[MAX_DM_NICKS][TOKEN_STR_SIZE] = {{0}};
+static char g_dmNick[MAX_DM_NICKS][MAX_NAME_LEN] = {{0}};
+static int g_dmCount = 0;
 
-typedef struct MessageNode {
-    char text[MSG_SIZE * 2];
-    struct MessageNode *next;
-} MessageNode;
-static MessageNode *g_msgHead = NULL;
-static MessageNode *g_msgTail = NULL;
-static int g_msgCount = 0;
-static int g_msgScroll = 0;
+static void clientLog(const char *fmt, ...) PRINTF_FMT(1, 2);
+static void addMessage(UiMessageTone tone, const char *fmt, ...)
+    PRINTF_FMT(2, 3);
 
-static bool sendToServer(const char *message);
+static const char *UI_RESET = "\033[0m";
+static const char *UI_HIDE_CURSOR = "\033[?25l";
+static const char *UI_SHOW_CURSOR = "\033[?25h";
+static const char *UI_ALT_ON = "\033[?1049h";
+static const char *UI_ALT_OFF = "\033[?1049l";
 
-static void addMessage(const char *text) {
-    MessageNode *node = calloc(1, sizeof(MessageNode));
-    if (!node) return;
-    snprintf(node->text, sizeof(node->text), "%s", text);
-    node->next = NULL;
-    if (g_msgTail) {
-        g_msgTail->next = node;
-        g_msgTail = node;
+static void logOpen(void) {
+  char configDir[512];
+  if (!platformGetConfigDir(configDir, sizeof(configDir)))
+    return;
+  if (!platformEnsureDir(configDir))
+    return;
+
+  pid_t pid = getpid();
+  snprintf(g_logPath, sizeof(g_logPath), "%s%ctui_%d.log", configDir,
+           SOCKETCHAT_PATH_SEP, pid);
+  g_logFile = fopen(g_logPath, "a");
+  if (!g_logFile)
+    return;
+  setvbuf(g_logFile, NULL, _IOLBF, 0);
+}
+
+static void clientLog(const char *fmt, ...) {
+  if (!g_logFile)
+    return;
+  time_t now = time(NULL);
+  struct tm tmInfo;
+  char ts[32] = "?";
+  if (platformLocalTime(now, &tmInfo))
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmInfo);
+
+  fprintf(g_logFile, "[%s] ", ts);
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(g_logFile, fmt, ap);
+  va_end(ap);
+  if (fmt[strlen(fmt) - 1] != '\n')
+    fputc('\n', g_logFile);
+}
+
+static void disableRawMode(void) {
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_origTermios);
+}
+
+static void enableRawMode(void) {
+  struct termios raw;
+  tcgetattr(STDIN_FILENO, &raw);
+  raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
+  tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+}
+
+static void uiMove(int row, int col) { printf("\033[%d;%dH", row, col); }
+
+static void uiRgbFg(int r, int g, int b) {
+  printf("\033[38;2;%d;%d;%dm", r, g, b);
+}
+
+static void uiRgbBg(int r, int g, int b) {
+  printf("\033[48;2;%d;%d;%dm", r, g, b);
+}
+
+static void uiClearScreen(void) { print("\033[2J"); }
+
+static void uiFillLine(int row, int cols, int r, int g, int b) {
+  uiMove(row, 1);
+  uiRgbBg(r, g, b);
+  for (int i = 0; i < cols; i++)
+    putchar(' ');
+  print(UI_RESET);
+}
+
+static void uiDrawText(int row, int col, int fgR, int fgG, int fgB, int bgR,
+                       int bgG, int bgB, const char *text) {
+  uiMove(row, col);
+  uiRgbBg(bgR, bgG, bgB);
+  uiRgbFg(fgR, fgG, fgB);
+  fputs(text, stdout);
+  print(UI_RESET);
+}
+
+static void uiDrawBox(int x, int y, int w, int h, const char *title) {
+  if (w < 4 || h < 3)
+    return;
+
+  int borderR = 60, borderG = 71, borderB = 89;
+  int panelR = 24, panelG = 29, panelB = 36;
+  for (int row = 0; row < h; row++) {
+    uiMove(y + row, x);
+    uiRgbBg(panelR, panelG, panelB);
+    uiRgbFg(borderR, borderG, borderB);
+    if (row == 0) {
+      putchar('+');
+      for (int i = 0; i < w - 2; i++)
+        putchar('-');
+      putchar('+');
+    } else if (row == h - 1) {
+      putchar('+');
+      for (int i = 0; i < w - 2; i++)
+        putchar('-');
+      putchar('+');
     } else {
-        g_msgHead = g_msgTail = node;
+      putchar('|');
+      for (int i = 0; i < w - 2; i++)
+        putchar(' ');
+      putchar('|');
     }
-    g_msgCount++;
-    while (g_msgCount > 1000 && g_msgHead) {
-        MessageNode *tmp = g_msgHead;
-        g_msgHead = g_msgHead->next;
-        free(tmp);
-        g_msgCount--;
-    }
+    print(UI_RESET);
+  }
+
+  if (title && title[0] && w > 6) {
+    char titleBuf[128];
+    snprintf(titleBuf, sizeof(titleBuf), " %s ", title);
+    uiDrawText(y, x + 2, 166, 191, 255, panelR, panelG, panelB, titleBuf);
+  }
 }
 
-static void clearMessages(void) {
-    while (g_msgHead) {
-        MessageNode *tmp = g_msgHead;
-        g_msgHead = g_msgHead->next;
-        free(tmp);
-    }
-    g_msgTail = NULL;
-    g_msgCount = 0;
+static void uiGetSize(int *rows, int *cols) {
+  struct winsize ws;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 &&
+      ws.ws_col > 0) {
+    *rows = ws.ws_row;
+    *cols = ws.ws_col;
+  } else {
+    *rows = 30;
+    *cols = 120;
+  }
 }
 
+static void uiEnter(void) {
+  print(UI_ALT_ON);
+  print(UI_HIDE_CURSOR);
+  uiClearScreen();
+}
 
+static void uiExit(void) {
+  print(UI_RESET);
+  print(UI_SHOW_CURSOR);
+  print(UI_ALT_OFF);
+}
 
-static void commitRoomEntry(void) {
-    clientLog("commitRoomEntry: entering room '%s'", g_pendingRoom.roomName);
-    memset(&g_encryption, 0, sizeof(g_encryption));
-    g_inRoom = false;
-    snprintf(g_currentRoom, sizeof(g_currentRoom), "%s", g_pendingRoom.roomName);
-    g_inRoom = true;
-    if (g_pendingRoom.hasKey) {
-        memcpy(g_encryption.key, g_pendingRoom.key, 32);
-        snprintf(g_encryption.roomName, sizeof(g_encryption.roomName), "%s",
-                 g_pendingRoom.roomName);
-        g_encryption.hasKey = true;
-    }
-    g_selectedRoom = -1;
-    for (int i = 0; i < g_roomCount; i++) {
-        if (strcmp(g_rooms[i], g_currentRoom) == 0) {
-            g_selectedRoom = i;
-            break;
-        }
-    }
-    if (g_selectedRoom == -1 && g_roomCount < 50) {
-        snprintf(g_rooms[g_roomCount++], MAX_NAME_LEN, "%s", g_currentRoom);
-        g_selectedRoom = g_roomCount - 1;
-    }
-    memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-    clearMessages();
+static void addMessage(UiMessageTone tone, const char *fmt, ...) {
+  if (g_messageCount == MAX_MESSAGES) {
+    memmove(&g_messages[0], &g_messages[1], sizeof(g_messages[0]) * (MAX_MESSAGES - 1));
+    g_messageCount--;
+  }
+
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(g_messages[g_messageCount].text, sizeof(g_messages[g_messageCount].text),
+            fmt, ap);
+  va_end(ap);
+  g_messages[g_messageCount].tone = tone;
+  g_messageCount++;
+}
+
+static void addTimestamped(UiMessageTone tone, const char *label,
+                           const char *message) {
+  time_t now = time(NULL);
+  struct tm tmInfo;
+  char ts[16] = "00:00";
+  if (platformLocalTime(now, &tmInfo))
+    strftime(ts, sizeof(ts), "%H:%M", &tmInfo);
+
+  if (label && label[0])
+    addMessage(tone, "[%s] %s: %s", ts, label, message);
+  else
+    addMessage(tone, "[%s] %s", ts, message);
 }
 
 static void clearRoomState(void) {
-    clientLog("clearRoomState: leaving room '%s'", g_currentRoom);
-    memset(&g_encryption, 0, sizeof(g_encryption));
-    memset(g_currentRoom, 0, sizeof(g_currentRoom));
-    g_inRoom = false;
-    g_selectedRoom = -1;
-    memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-    clearMessages();
+  memset(&g_room, 0, sizeof(g_room));
 }
 
 static void clearDmSession(void) {
-    clientLog("clearDmSession");
-    memset(&g_dm, 0, sizeof(g_dm));
-    g_selectedDm = -1;
+  memset(&g_dm, 0, sizeof(g_dm));
 }
 
-static bool encryptAndSendDm(const char *message, size_t msgLen) {
-    unsigned char ciphertext[MSG_SIZE];
-    int clen = encryptMessage((const unsigned char *)message, msgLen, g_dm.key, ciphertext);
-    if (clen <= 0) return false;
-    char encoded[MSG_SIZE * 2];
-    encodeBase64(ciphertext, (size_t)clen, encoded);
-    char toSend[MSG_SIZE * 2 + TOKEN_STR_SIZE + 16];
-    snprintf(toSend, sizeof(toSend), "DM:%s:ENC:%s\n", g_dm.peerToken, encoded);
-    return sendToServer(toSend);
+static void reloadDmNicknames(void) {
+  memset(g_dmNick, 0, sizeof(g_dmNick));
+  DmNickEntry entries[MAX_DM_NICKS];
+  size_t count = identityLoadDmNickEntries(entries, MAX_DM_NICKS);
+  for (size_t i = 0; i < count; i++) {
+    for (int j = 0; j < g_dmCount; j++) {
+      if (strcmp(g_dmList[j], entries[i].token) == 0) {
+        snprintf(g_dmNick[j], sizeof(g_dmNick[j]), "%s", entries[i].nick);
+        break;
+      }
+    }
+  }
 }
 
-static bool encryptAndSendRoom(const char *message, size_t msgLen) {
-    unsigned char ciphertext[MSG_SIZE];
-    int clen = encryptMessage((const unsigned char *)message, msgLen, g_encryption.key, ciphertext);
-    if (clen <= 0) return false;
-    char encoded[MSG_SIZE * 2];
-    encodeBase64(ciphertext, (size_t)clen, encoded);
-    char toSend[MSG_SIZE * 2 + 10];
-    snprintf(toSend, sizeof(toSend), "ENC:%s\n", encoded);
-    return sendToServer(toSend);
+static void reloadDmHistoryIndex(void) {
+  g_dmCount = historyGetAll(g_dmList);
+  reloadDmNicknames();
 }
 
-static void handleIncomingDm(const char *frame) {
-    const char *p = frame + 3;
-    if (strlen(p) < TOKEN_HEX_LEN + 1) return;
-    char senderToken[TOKEN_STR_SIZE];
-    memcpy(senderToken, p, TOKEN_HEX_LEN);
-    senderToken[TOKEN_HEX_LEN] = '\0';
-    const char *payload = p + TOKEN_HEX_LEN + 1;
-
-    if (g_dm.active || g_dm.pending) {
-        return;
-    }
-    if (strncmp(payload, "DM_REQ:", 7) == 0) {
-        const char *peerPubHex = payload + 7;
-        char trimmed[TOKEN_STR_SIZE];
-        snprintf(trimmed, sizeof(trimmed), "%.*s", TOKEN_HEX_LEN, peerPubHex);
-        unsigned char peerPubX25519[32];
-        if (!tokenToX25519PublicKey(trimmed, peerPubX25519)) return;
-        unsigned char myPrivX25519[32];
-        if (!identityEd25519PrivToX25519(g_identity.priv, myPrivX25519)) return;
-        unsigned char sharedKey[32];
-        bool ok = ecdhDeriveKey(myPrivX25519, peerPubX25519, sharedKey);
-        memset(myPrivX25519, 0, sizeof(myPrivX25519));
-        if (!ok) return;
-        g_dm.pending = true;
-        snprintf(g_dm.pendingToken, sizeof(g_dm.pendingToken), "%s", senderToken);
-        memcpy(g_dm.pendingKey, sharedKey, 32);
-        char shortToken[13];
-        snprintf(shortToken, sizeof(shortToken), "%.10s", senderToken);
-        char msg[MSG_SIZE];
-        snprintf(msg, sizeof(msg), "[*] DM from %.16s... (use /dm %.64s to reply)\n",
-                 shortToken, senderToken);
-        addMessage(msg);
-        bool found = false;
-        for (int i = 0; i < g_dmCount; i++) {
-            if (strcmp(g_dmList[i], senderToken) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found && g_dmCount < 50) {
-            snprintf(g_dmList[g_dmCount++], TOKEN_STR_SIZE, "%s", senderToken);
-        }
-        return;
-    }
-
-    if (strncmp(payload, "ENC:", 4) == 0) {
-        if (g_dm.active && strncmp(g_dm.peerToken, senderToken, TOKEN_HEX_LEN) == 0) {
-            unsigned char decoded[MSG_SIZE];
-            int dlen = decodeBase64(payload + 4, decoded);
-            if (dlen <= 0) return;
-            unsigned char decrypted[MSG_SIZE];
-            int plen = decryptMessage(decoded, (size_t)dlen, g_dm.key, decrypted);
-            if (plen <= 0) return;
-            decrypted[plen] = '\0';
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char msg[MSG_SIZE * 2];
-            snprintf(msg, sizeof(msg), "[%s] %s", ts, (char *)decrypted);
-            addMessage(msg);
-            return;
-        }
-        if (g_dm.pending && strncmp(g_dm.pendingToken, senderToken, TOKEN_HEX_LEN) == 0) {
-            g_dm.active = true;
-            g_dm.pending = false;
-            snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", g_dm.pendingToken);
-            memcpy(g_dm.key, g_dm.pendingKey, 32);
-            memset(g_dm.pendingKey, 0, sizeof(g_dm.pendingKey));
-            addMessage("[*] DM session resumed");
-            unsigned char decoded[MSG_SIZE];
-            int dlen = decodeBase64(payload + 4, decoded);
-            if (dlen <= 0) return;
-            unsigned char decrypted[MSG_SIZE];
-            int plen = decryptMessage(decoded, (size_t)dlen, g_dm.key, decrypted);
-            if (plen <= 0) return;
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            int truncLen = plen;
-            if (truncLen > MSG_SIZE - 20) truncLen = MSG_SIZE - 20;
-            decrypted[truncLen] = '\0';
-            #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wformat-truncation"
-            char msg[MSG_SIZE];
-            snprintf(msg, sizeof(msg), "[%s] %s", ts, (char *)decrypted);
-#pragma GCC diagnostic pop
-            addMessage(msg);
-            return;
-        }
-        addMessage("[!] Encrypted DM from unknown session");
-    }
+static void saveDmNicknames(void) {
+  DmNickEntry entries[MAX_DM_NICKS];
+  size_t count = 0;
+  for (int i = 0; i < g_dmCount && count < MAX_DM_NICKS; i++) {
+    if (!g_dmList[i][0] || !g_dmNick[i][0])
+      continue;
+    snprintf(entries[count].token, sizeof(entries[count].token), "%s", g_dmList[i]);
+    snprintf(entries[count].nick, sizeof(entries[count].nick), "%s", g_dmNick[i]);
+    count++;
+  }
+  identitySaveDmNickEntries(entries, count);
 }
 
-static bool handleRoomResponse(const char *text) {
-    if (g_pendingRoom.pending) {
-        pthread_mutex_lock(&g_inputMutex);
-        g_waitingForRoomJoin = false;
-        pthread_mutex_unlock(&g_inputMutex);
+static void rememberDmToken(const char *token) {
+  for (int i = 0; i < g_dmCount; i++) {
+    if (strcmp(g_dmList[i], token) == 0)
+      return;
+  }
+  if (g_dmCount < MAX_DM_NICKS) {
+    snprintf(g_dmList[g_dmCount], sizeof(g_dmList[g_dmCount]), "%s", token);
+    g_dmCount++;
+  }
+}
 
-        if (strncmp(text, "Entered room '", 14) == 0) {
-            commitRoomEntry();
-            g_expectServerResponse = false;
-            return true;
-        }
-        if (strncmp(text, "Left room", 9) == 0) {
-            clearRoomState();
-            g_expectServerResponse = false;
-            return true;
-        }
-        if (strncmp(text, "Incorrect password", 18) == 0 ||
-            (strncmp(text, "Room '", 6) == 0 && strstr(text, "' does not exist") != NULL)) {
-            memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-            g_expectServerResponse = false;
-            return false;
-        }
-    }
+static int findDmByReference(const char *input) {
+  if (!input || !input[0])
+    return -1;
 
-    if (strncmp(text, "Room '", 6) == 0 && strstr(text, "' created") != NULL) {
-        g_expectServerResponse = false;
-        return false;
-    }
+  for (int i = 0; i < g_dmCount; i++) {
+    if (g_dmNick[i][0] && strcmp(g_dmNick[i], input) == 0)
+      return i;
+  }
+  for (int i = 0; i < g_dmCount; i++) {
+    if (strncmp(g_dmList[i], input, strlen(input)) == 0)
+      return i;
+  }
+  return -1;
+}
 
+static bool sendRawFrame(const char *frame) {
+  pthread_mutex_lock(&g_stateMutex);
+  bool connected = g_input.connected;
+  pthread_mutex_unlock(&g_stateMutex);
+  if (!connected)
     return false;
+
+  clientLog("send: %.160s", frame);
+  return tlsSend(g_ssl, frame, strlen(frame));
 }
 
-static void finalizePasswordEntry(void) {
-    char passwordHash[SHA256_HEX_SIZE];
-    sha256Hex(g_passwordBuffer, g_passwordLen, passwordHash);
+static bool signDmFrame(const char *frameType, const char *fromToken,
+                        const char *toToken, const char *pubHex,
+                        unsigned char sigOut[SIG_BYTES]) {
+  char transcript[256];
+  int len = snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s", frameType,
+                     fromToken, toToken, pubHex);
+  if (len <= 0 || (size_t)len >= sizeof(transcript))
+    return false;
+  return identitySign(&g_identity, (const unsigned char *)transcript, (size_t)len,
+                      sigOut);
+}
 
-    char toSend[MSG_SIZE];
-    memcpy(toSend, passwordHash, SHA256_HEX_SIZE - 1);
-    toSend[SHA256_HEX_SIZE - 1] = '\n';
-    toSend[SHA256_HEX_SIZE] = '\0';
-    clientLog("Sending hashed password to server for room '%s'", g_pendingRoom.roomName);
-    sendToServer(toSend);
+static bool verifyDmFrame(const char *frameType, const char *fromToken,
+                          const char *toToken, const char *pubHex,
+                          const unsigned char sig[SIG_BYTES]) {
+  char transcript[256];
+  int len = snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s", frameType,
+                     fromToken, toToken, pubHex);
+  if (len <= 0 || (size_t)len >= sizeof(transcript))
+    return false;
+  return identityVerify(fromToken, (const unsigned char *)transcript, (size_t)len,
+                        sig);
+}
 
-    if (g_passwordLen > 0) {
-        deriveKeyFromPassword(g_passwordBuffer, g_pendingRoom.key);
-        g_pendingRoom.hasKey = true;
-    } else {
-        memset(g_pendingRoom.key, 0, 32);
-        g_pendingRoom.hasKey = false;
+static bool encryptAndSendRoom(const char *message) {
+  char payload[MSG_SIZE * 2];
+  if (!g_room.protectedRoom) {
+    if (!protocolEncodeText(message, payload, sizeof(payload)))
+      return false;
+  } else {
+    unsigned char ciphertext[MSG_SIZE];
+    int clen = encryptMessage((const unsigned char *)message, strlen(message),
+                              g_room.key, ciphertext);
+    if (clen <= 0)
+      return false;
+    encodeBase64(ciphertext, (size_t)clen, payload);
+  }
+
+  char frame[MSG_SIZE * 2 + 32];
+  snprintf(frame, sizeof(frame), "ROOM_SEND|%s\n", payload);
+  return sendRawFrame(frame);
+}
+
+static bool encryptAndSendDm(const char *message) {
+  unsigned char ciphertext[MSG_SIZE];
+  int clen = encryptMessage((const unsigned char *)message, strlen(message),
+                            g_dm.key, ciphertext);
+  if (clen <= 0)
+    return false;
+
+  char payload[MSG_SIZE * 2];
+  encodeBase64(ciphertext, (size_t)clen, payload);
+  char frame[MSG_SIZE * 2 + TOKEN_STR_SIZE + 32];
+  snprintf(frame, sizeof(frame), "DM_SEND|%s|%s\n", g_dm.peerToken, payload);
+  return sendRawFrame(frame);
+}
+
+static void showRoomMessage(const char *sender, const char *payload) {
+  char text[MSG_SIZE];
+  if (!g_room.protectedRoom) {
+    if (!protocolDecodeText(payload, text, sizeof(text))) {
+      addMessage(UI_MSG_ERROR, "[!] Failed to decode room payload");
+      return;
     }
+  } else {
+    unsigned char decoded[MSG_SIZE];
+    int dlen = decodeBase64(payload, decoded);
+    if (dlen <= 0) {
+      addMessage(UI_MSG_ERROR, "[!] Failed to decode encrypted room payload");
+      return;
+    }
+    unsigned char decrypted[MSG_SIZE];
+    int plen = decryptMessage(decoded, (size_t)dlen, g_room.key, decrypted);
+    if (plen <= 0) {
+      addMessage(UI_MSG_ERROR, "[!] Failed to decrypt room payload");
+      return;
+    }
+    decrypted[plen] = '\0';
+    snprintf(text, sizeof(text), "%s", (char *)decrypted);
+  }
+  addTimestamped(UI_MSG_CHAT, sender, text);
+}
 
-    memset(g_passwordBuffer, 0, sizeof(g_passwordBuffer));
-    memset(passwordHash, 0, sizeof(passwordHash));
-    g_passwordLen = 0;
-    pthread_mutex_lock(&g_inputMutex);
-    g_readingPassword = false;
-    pthread_mutex_unlock(&g_inputMutex);
+static void showDmMessage(const char *senderToken, const char *payload) {
+  if (!g_dm.active || strcmp(g_dm.peerToken, senderToken) != 0) {
+    addMessage(UI_MSG_INFO, "[*] Received a DM for an inactive session");
+    return;
+  }
 
-    pthread_mutex_lock(&g_inputMutex);
-    g_inputState.buffer[0] = '\0';
-    g_inputState.length = 0;
-    pthread_mutex_unlock(&g_inputMutex);
+  unsigned char decoded[MSG_SIZE];
+  int dlen = decodeBase64(payload, decoded);
+  if (dlen <= 0) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to decode DM payload");
+    return;
+  }
+
+  unsigned char decrypted[MSG_SIZE];
+  int plen = decryptMessage(decoded, (size_t)dlen, g_dm.key, decrypted);
+  if (plen <= 0) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to decrypt DM payload");
+    return;
+  }
+
+  decrypted[plen] = '\0';
+  historyAppend(senderToken, false, (char *)decrypted);
+  rememberDmToken(senderToken);
+  addTimestamped(UI_MSG_CHAT, senderToken, (char *)decrypted);
+}
+
+static void finalizeRoomSecretEntry(void) {
+  char verifier[SHA256_HEX_SIZE];
+  if (!verifyRoomSecret(g_room.pendingName, g_input.roomSecret, g_room.pendingSalt,
+                        verifier, g_room.pendingKey)) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to derive room secret");
+  } else {
+    char frame[MSG_SIZE];
+    snprintf(frame, sizeof(frame), "ROOM_PROOF|%s|%s\n", g_room.pendingName,
+             verifier);
+    sendRawFrame(frame);
+  }
+
+  memset(g_input.roomSecret, 0, sizeof(g_input.roomSecret));
+  g_input.roomSecretLen = 0;
+  g_input.readingRoomSecret = false;
+}
+
+static void handleDmInit(const char *senderToken, const char *peerPubHex,
+                         const char *sigHex) {
+  if (strlen(senderToken) != TOKEN_HEX_LEN || strlen(peerPubHex) != 64 ||
+      strlen(sigHex) != SIG_HEX_LEN) {
+    addMessage(UI_MSG_ERROR, "[!] Malformed DM_INIT frame");
+    return;
+  }
+
+  unsigned char sig[SIG_BYTES];
+  unsigned char peerPub[32];
+  if (!hexToBytes(sigHex, sig, sizeof(sig)) ||
+      !hexToBytes(peerPubHex, peerPub, sizeof(peerPub))) {
+    addMessage(UI_MSG_ERROR, "[!] Invalid DM_INIT encoding");
+    return;
+  }
+  if (!verifyDmFrame("DM_INIT", senderToken, g_identity.token, peerPubHex, sig)) {
+    addMessage(UI_MSG_ERROR, "[!] DM_INIT signature verification failed");
+    return;
+  }
+
+  unsigned char myPub[32];
+  unsigned char myPriv[32];
+  if (!x25519GenerateKeypair(myPub, myPriv)) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to generate DM session keys");
+    return;
+  }
+
+  unsigned char sessionKey[32];
+  if (!ecdhDeriveSessionKey(myPriv, peerPub, senderToken, g_identity.token,
+                            peerPub, myPub, sessionKey)) {
+    memset(myPriv, 0, sizeof(myPriv));
+    addMessage(UI_MSG_ERROR, "[!] Failed to derive DM session key");
+    return;
+  }
+
+  char myPubHex[65];
+  bytesToHex(myPub, sizeof(myPub), myPubHex);
+  unsigned char ackSig[SIG_BYTES];
+  if (!signDmFrame("DM_ACK", g_identity.token, senderToken, myPubHex, ackSig)) {
+    memset(myPriv, 0, sizeof(myPriv));
+    addMessage(UI_MSG_ERROR, "[!] Failed to sign DM acknowledgment");
+    return;
+  }
+
+  char ackSigHex[SIG_HEX_SIZE];
+  bytesToHex(ackSig, sizeof(ackSig), ackSigHex);
+  char frame[MSG_SIZE];
+  snprintf(frame, sizeof(frame), "DM_ACK|%s|%s|%s\n", senderToken, myPubHex,
+           ackSigHex);
+  sendRawFrame(frame);
+
+  clearDmSession();
+  g_dm.active = true;
+  snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", senderToken);
+  memcpy(g_dm.key, sessionKey, sizeof(sessionKey));
+  memset(myPriv, 0, sizeof(myPriv));
+  rememberDmToken(senderToken);
+  addMessage(UI_MSG_INFO, "[*] DM session established");
+}
+
+static void handleDmAck(const char *senderToken, const char *peerPubHex,
+                        const char *sigHex) {
+  if (!g_dm.awaitingAck || strcmp(g_dm.peerToken, senderToken) != 0)
+    return;
+
+  unsigned char sig[SIG_BYTES];
+  unsigned char peerPub[32];
+  if (!hexToBytes(sigHex, sig, sizeof(sig)) ||
+      !hexToBytes(peerPubHex, peerPub, sizeof(peerPub))) {
+    addMessage(UI_MSG_ERROR, "[!] Invalid DM_ACK encoding");
+    return;
+  }
+
+  if (!verifyDmFrame("DM_ACK", senderToken, g_identity.token, peerPubHex, sig)) {
+    addMessage(UI_MSG_ERROR, "[!] DM_ACK signature verification failed");
+    return;
+  }
+
+  unsigned char sessionKey[32];
+  if (!ecdhDeriveSessionKey(g_dm.pendingPriv, peerPub, g_identity.token,
+                            senderToken, g_dm.pendingPub, peerPub, sessionKey)) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to derive DM session key");
+    return;
+  }
+
+  g_dm.active = true;
+  g_dm.awaitingAck = false;
+  memcpy(g_dm.key, sessionKey, sizeof(sessionKey));
+  memset(g_dm.pendingPriv, 0, sizeof(g_dm.pendingPriv));
+  memset(g_dm.pendingPub, 0, sizeof(g_dm.pendingPub));
+  rememberDmToken(senderToken);
+  addMessage(UI_MSG_INFO, "[*] DM session ready");
 }
 
 static void displayIncomingMessage(char *buffer) {
-    bool isMsg = (buffer[0] == 'M' && buffer[1] == 'S' && buffer[2] == 'G');
-    bool isErr = (buffer[0] == 'E' && buffer[1] == 'R' && buffer[2] == 'R');
-    bool isRes = (buffer[0] == 'R' && buffer[1] == 'E' && buffer[2] == 'S');
-    bool isPas = (buffer[0] == 'P' && buffer[1] == 'A' && buffer[2] == 'S');
-    bool isDm = (buffer[0] == 'D' && buffer[1] == 'M' && buffer[2] == ':');
+  char *parts[PROTOCOL_MAX_PARTS] = {0};
+  size_t partCount = protocolSplitFields(buffer, parts, PROTOCOL_MAX_PARTS);
+  if (partCount == 0)
+    return;
 
-    clientLog("recv: %.80s", buffer);
+  clientLog("recv: %.160s", buffer);
+  pthread_mutex_lock(&g_stateMutex);
+  g_input.buffer[0] = '\0';
+  g_input.length = 0;
+  pthread_mutex_unlock(&g_stateMutex);
 
-    if (isDm) {
-        handleIncomingDm(buffer);
-        return;
+  if (strcmp(parts[0], "ERR") == 0 && partCount >= 2) {
+    addMessage(UI_MSG_ERROR, "[!] %s", parts[1]);
+  } else if (strcmp(parts[0], "OK") == 0 && partCount >= 2) {
+    if (strcmp(parts[1], "ROOM_ENTERED") == 0 && partCount >= 3) {
+      g_room.active = true;
+      snprintf(g_room.currentName, sizeof(g_room.currentName), "%s",
+               g_room.pendingName);
+      g_room.protectedRoom = strcmp(parts[2], "PROTECTED") == 0;
+      if (g_room.protectedRoom)
+        memcpy(g_room.key, g_room.pendingKey, sizeof(g_room.key));
+      addMessage(UI_MSG_INFO, "[*] Entered room %s", g_room.currentName);
+    } else if (strcmp(parts[1], "ROOM_LEFT") == 0) {
+      clearRoomState();
+      addMessage(UI_MSG_INFO, "[*] Left room");
+    } else if (strcmp(parts[1], "ROOM_CREATED") == 0) {
+      addMessage(UI_MSG_INFO, "[*] Room created");
+    } else if (strcmp(parts[1], "NAME_SET") == 0) {
+      addMessage(UI_MSG_INFO, "[*] Name updated");
     }
-
-    if (isMsg) {
-        const char *payload = buffer + 3;
-        char username[64] = {0};
-        const char *messageStart = payload;
-        const char *colon = strchr(payload, ':');
-        if (colon && colon != payload) {
-            size_t ulen = (size_t)(colon - payload);
-            if (ulen < sizeof(username)) {
-                memcpy(username, payload, ulen);
-                username[ulen] = '\0';
-                messageStart = colon + 2;
-            }
-        }
-
-        if (strcmp(username, g_username) == 0) {
-            return;
-        }
-        if (isEncryptedMessage(messageStart) && g_encryption.hasKey) {
-            unsigned char decoded[MSG_SIZE];
-            int dlen = decodeBase64(messageStart + 4, decoded);
-            if (dlen <= 0) {
-                addMessage("[!] Failed to decrypt message");
-                return;
-            }
-            unsigned char decrypted[MSG_SIZE];
-            int plen = decryptMessage(decoded, (size_t)dlen, g_encryption.key, decrypted);
-            if (plen <= 0) {
-                addMessage("[!] Failed to decrypt message");
-                return;
-            }
-            decrypted[plen] = '\0';
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char msg[MSG_SIZE * 2];
-            if (username[0])
-                snprintf(msg, sizeof(msg), "[%s] %s: %s", ts, username, (char *)decrypted);
-            else
-                snprintf(msg, sizeof(msg), "[%s] %s", ts, (char *)decrypted);
-            addMessage(msg);
-        } else if (isEncryptedMessage(messageStart) && !g_encryption.hasKey) {
-            addMessage("[!] Encrypted message (not in encrypted room)");
-        } else {
-            char text[MSG_SIZE];
-            snprintf(text, sizeof(text), "%s", messageStart);
-            size_t tlen = strlen(text);
-            while (tlen > 0 && (text[tlen - 1] == '\n' || text[tlen - 1] == '\r'))
-                text[--tlen] = '\0';
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char msg[MSG_SIZE * 2];
-            if (username[0])
-                snprintf(msg, sizeof(msg), "[%s] %s: %s", ts, username, text);
-            else
-                snprintf(msg, sizeof(msg), "[%s] %s", ts, text);
-            addMessage(msg);
-        }
-    } else if (isErr) {
-        char msg[MSG_SIZE];
-        snprintf(msg, sizeof(msg), "[!] %s", buffer + 3);
-        addMessage(msg);
-    } else if (isRes) {
-        const char *text = buffer + 3;
-        if (strncmp(text, "Available rooms:", 15) == 0) {
-            g_roomCount = 0;
-            const char *p = text;
-            while ((p = strstr(p, "  ")) != NULL) {
-                p += 2;
-                char roomName[MAX_NAME_LEN] = {0};
-                if (sscanf(p, "%63s", roomName) == 1 && roomName[0] != '[') {
-                    if (g_roomCount < 50) {
-                        snprintf(g_rooms[g_roomCount++], MAX_NAME_LEN, "%s", roomName);
-                    }
-                    while (*p && *p != '\n') p++;
-                } else {
-                    break;
-                }
-            }
-            char msg[MSG_SIZE];
-            snprintf(msg, sizeof(msg), "[*] Rooms updated");
-            addMessage(msg);
-            return;
-        }
-
-        bool success = handleRoomResponse(text);
-        if (!success) {
-            if (strncmp(text, "Incorrect password", 18) == 0) {
-                addMessage("[!] Incorrect password");
-            } else if (strncmp(text, "Room '", 6) == 0 && strstr(text, "' does not exist") != NULL) {
-                char err[MSG_SIZE];
-                snprintf(err, sizeof(err), "[!] %s", text);
-                addMessage(err);
-            } else {
-                char msg[MSG_SIZE];
-                snprintf(msg, sizeof(msg), "[*] %s", text);
-                addMessage(msg);
-            }
-        }
-    } else if (isPas) {
-        pthread_mutex_lock(&g_inputMutex);
-        g_readingPassword = true;
-        memset(g_passwordBuffer, 0, sizeof(g_passwordBuffer));
-        g_passwordLen = 0;
-        g_waitingForRoomJoin = false;
-        pthread_mutex_unlock(&g_inputMutex);
-        addMessage("[*] Enter password: ");
+  } else if (strcmp(parts[0], "INFO") == 0 && partCount >= 2) {
+    if (strcmp(parts[1], "ROOMS_BEGIN") == 0) {
+      g_roomCount = 0;
+      g_roomsLoading = true;
+      addMessage(UI_MSG_INFO, "[*] Refreshing rooms");
+    } else if (strcmp(parts[1], "ROOM") == 0 && partCount >= 4) {
+      if (g_roomCount < 50) {
+        snprintf(g_rooms[g_roomCount], sizeof(g_rooms[g_roomCount]), "%s", parts[2]);
+        snprintf(g_roomTypes[g_roomCount], sizeof(g_roomTypes[g_roomCount]), "%s",
+                 parts[3]);
+        g_roomCount++;
+      }
+    } else if (strcmp(parts[1], "ROOMS_END") == 0) {
+      g_roomsLoading = false;
+    } else if (strcmp(parts[1], "ROOM_JOINED") == 0 && partCount >= 3) {
+      addMessage(UI_MSG_INFO, "[*] %s joined the room", parts[2]);
+    } else if (strcmp(parts[1], "ROOM_LEFT") == 0 && partCount >= 3) {
+      addMessage(UI_MSG_INFO, "[*] %s left the room", parts[2]);
+    } else if (strcmp(parts[1], "NAME_CHANGED") == 0 && partCount >= 4) {
+      addMessage(UI_MSG_INFO, "[*] %s is now %s", parts[2], parts[3]);
     }
+  } else if (strcmp(parts[0], "ROOM_CHALLENGE") == 0 && partCount >= 3) {
+    snprintf(g_room.pendingName, sizeof(g_room.pendingName), "%s", parts[1]);
+    snprintf(g_room.pendingSalt, sizeof(g_room.pendingSalt), "%s", parts[2]);
+    g_input.readingRoomSecret = true;
+    g_input.roomSecret[0] = '\0';
+    g_input.roomSecretLen = 0;
+    addMessage(UI_MSG_INFO, "[*] Enter the room secret below");
+  } else if (strcmp(parts[0], "ROOM_MSG") == 0 && partCount >= 3) {
+    showRoomMessage(parts[1], parts[2]);
+  } else if (strcmp(parts[0], "DM_INIT") == 0 && partCount >= 4) {
+    handleDmInit(parts[1], parts[2], parts[3]);
+  } else if (strcmp(parts[0], "DM_ACK") == 0 && partCount >= 4) {
+    handleDmAck(parts[1], parts[2], parts[3]);
+  } else if (strcmp(parts[0], "DM_MSG") == 0 && partCount >= 3) {
+    showDmMessage(parts[1], parts[2]);
+  } else {
+    addMessage(UI_MSG_ERROR, "[!] Unknown frame from server");
+  }
 }
 
 static void handleDisconnect(void) {
-    pthread_mutex_lock(&g_inputMutex);
-    g_connected = false;
-    pthread_mutex_unlock(&g_inputMutex);
-    addMessage("[!] Disconnected from server");
-    close(g_socketFD);
+  pthread_mutex_lock(&g_stateMutex);
+  g_input.connected = false;
+  addMessage(UI_MSG_ERROR, "[!] Disconnected from server");
+  pthread_mutex_unlock(&g_stateMutex);
+  if (g_socketFD != INVALID_SOCKET_HANDLE)
+    platformCloseSocket(g_socketFD);
 }
 
 static void *receiveThread(void *arg) {
-    (void)arg;
-    char buffer[MSG_SIZE];
-    while (true) {
-        ssize_t received = tlsRecv(g_ssl, buffer, MSG_SIZE);
-        if (received <= 0) {
-            handleDisconnect();
-            break;
-        }
-        buffer[received] = '\0';
-        displayIncomingMessage(buffer);
+  (void)arg;
+  char buffer[MSG_SIZE];
+  while (true) {
+    ssize_t received = tlsRecv(g_ssl, buffer, sizeof(buffer));
+    if (received <= 0) {
+      handleDisconnect();
+      break;
     }
-    return NULL;
+    buffer[received] = '\0';
+    pthread_mutex_lock(&g_stateMutex);
+    displayIncomingMessage(buffer);
+    pthread_mutex_unlock(&g_stateMutex);
+  }
+  return NULL;
 }
 
-static bool sendToServer(const char *message) {
-    pthread_mutex_lock(&g_inputMutex);
-    bool connected = g_connected;
-    pthread_mutex_unlock(&g_inputMutex);
-    if (!connected) return false;
-    size_t len = strlen(message);
-    if (len >= MSG_SIZE) return false;
-    clientLog("send: %.120s", message);
-    if (!tlsSend(g_ssl, message, len)) {
-        handleDisconnect();
-        return false;
+static void uiDrawMessages(int x, int y, int w, int h) {
+  int panelR = 24, panelG = 29, panelB = 36;
+  int visible = h - 2;
+  int maxScroll = g_messageCount > visible ? g_messageCount - visible : 0;
+  if (g_messageScroll > maxScroll)
+    g_messageScroll = maxScroll;
+  if (g_messageScroll < 0)
+    g_messageScroll = 0;
+
+  int start = g_messageCount > visible ? g_messageCount - visible - g_messageScroll : 0;
+  if (start < 0)
+    start = 0;
+
+  for (int row = 0; row < visible; row++) {
+    int idx = start + row;
+    char line[MSG_SIZE * 2];
+    if (idx < g_messageCount) {
+      snprintf(line, sizeof(line), "%.*s", w - 4, g_messages[idx].text);
+    } else {
+      line[0] = '\0';
+    }
+
+    int fgR = 191, fgG = 203, fgB = 214;
+    if (idx < g_messageCount) {
+      switch (g_messages[idx].tone) {
+      case UI_MSG_INFO:
+        fgR = 233; fgG = 196; fgB = 106;
+        break;
+      case UI_MSG_ERROR:
+        fgR = 239; fgG = 108; fgB = 96;
+        break;
+      case UI_MSG_SELF:
+        fgR = 152; fgG = 195; fgB = 121;
+        break;
+      case UI_MSG_CHAT:
+      default:
+        fgR = 191; fgG = 203; fgB = 214;
+        break;
+      }
+    }
+
+    char padded[MSG_SIZE * 2];
+    snprintf(padded, sizeof(padded), "%-*s", w - 4, line);
+    uiDrawText(y + 1 + row, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, padded);
+  }
+}
+
+static void uiDrawSidebar(int x, int y, int w, int h) {
+  int panelR = 24, panelG = 29, panelB = 36;
+  int fgR = 166, fgG = 191, fgB = 255;
+  int row = y + 1;
+
+  if (row < y + h - 1) {
+    uiDrawText(row++, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, "Rooms");
+  }
+  for (int i = 0; i < g_roomCount && row < y + h - 1; i++) {
+    char line[64];
+    snprintf(line, sizeof(line), "%s%s [%s]",
+             strcmp(g_rooms[i], g_room.currentName) == 0 ? "* " : "  ", g_rooms[i],
+             g_roomTypes[i][0] ? g_roomTypes[i] : "?");
+    char padded[64];
+    snprintf(padded, sizeof(padded), "%-*.*s", w - 4, w - 4, line);
+    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, padded);
+  }
+
+  if (row < y + h - 2) {
+    row++;
+    uiDrawText(row++, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, "DMs");
+  }
+  for (int i = 0; i < g_dmCount && row < y + h - 1; i++) {
+    char line[64];
+    if (g_dmNick[i][0])
+      snprintf(line, sizeof(line), "%s%s", strcmp(g_dmList[i], g_dm.peerToken) == 0 ? "* " : "  ", g_dmNick[i]);
+    else
+      snprintf(line, sizeof(line), "%s%.12s", strcmp(g_dmList[i], g_dm.peerToken) == 0 ? "* " : "  ", g_dmList[i]);
+    char padded[64];
+    snprintf(padded, sizeof(padded), "%-*.*s", w - 4, w - 4, line);
+    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, padded);
+  }
+
+  if (row < y + h - 3)
+    row++;
+  if (row < y + h - 2)
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+               "Up/Down scroll");
+  if (row < y + h - 2)
+    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+               "F1 or ? help");
+}
+
+static void uiDrawInput(int x, int y, int w, int h) {
+  (void)h;
+  int panelR = 18, panelG = 23, panelB = 30;
+  char prompt[64];
+  if (g_input.readingRoomSecret)
+    snprintf(prompt, sizeof(prompt), "room secret");
+  else if (g_dm.active)
+    snprintf(prompt, sizeof(prompt), "dm %.8s", g_dm.peerToken);
+  else if (g_room.active)
+    snprintf(prompt, sizeof(prompt), "room %s", g_room.currentName);
+  else
+    snprintf(prompt, sizeof(prompt), "lobby");
+
+  uiDrawText(y + 1, x + 2, 166, 191, 255, panelR, panelG, panelB, prompt);
+
+  char content[MSG_SIZE];
+  if (g_input.readingRoomSecret) {
+    size_t stars = g_input.roomSecretLen;
+    if (stars >= sizeof(content))
+      stars = sizeof(content) - 1;
+    memset(content, '*', stars);
+    content[stars] = '\0';
+  } else {
+    snprintf(content, sizeof(content), "%s", g_input.buffer);
+  }
+
+  char clipped[MSG_SIZE];
+  snprintf(clipped, sizeof(clipped), "%-*.*s", w - 4, w - 4, content);
+  uiDrawText(y + 2, x + 2, 233, 237, 243, panelR, panelG, panelB, clipped);
+}
+
+static void uiDrawHelp(int rows, int cols) {
+  int w = cols > 80 ? 70 : cols - 8;
+  int h = 14;
+  int x = (cols - w) / 2;
+  int y = (rows - h) / 2;
+  int panelR = 24, panelG = 29, panelB = 36;
+
+  uiDrawBox(x, y, w, h, "Help");
+  uiDrawText(y + 2, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "/name  /rooms  /create  /enter  /leave");
+  uiDrawText(y + 3, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "/dm  /dmleave  /list  /nick  /token");
+  uiDrawText(y + 4, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "/create <room> -p <secret> creates a protected room");
+  uiDrawText(y + 5, x + 2, 233, 237, 243, panelR, panelG, panelB,
+             "Messages stay end-to-end encrypted for protected rooms and DMs");
+  uiDrawText(y + 7, x + 2, 166, 191, 255, panelR, panelG, panelB,
+             "Scroll: Up/Down");
+  uiDrawText(y + 8, x + 2, 166, 191, 255, panelR, panelG, panelB,
+             "Toggle help: F1 or ?");
+  uiDrawText(y + 10, x + 2, 127, 140, 156, panelR, panelG, panelB,
+             "Press any help key again to close");
+}
+
+static void renderUi(void) {
+  int rows, cols;
+  uiGetSize(&rows, &cols);
+  if (rows < 16 || cols < 70) {
+    uiMove(1, 1);
+    print("Terminal too small. Resize to at least 70x16.");
+    fflush(stdout);
+    return;
+  }
+
+  int sidebar = SIDEBAR_WIDTH;
+  int messageW = cols - sidebar - 3;
+  int messageH = rows - 5;
+
+  uiClearScreen();
+  uiFillLine(1, cols, 18, 23, 30);
+  uiDrawText(1, 2, 233, 237, 243, 18, 23, 30, "SocketChat");
+  if (g_dm.active) {
+    char ctx[64];
+    snprintf(ctx, sizeof(ctx), "DM %.12s", g_dm.peerToken);
+    uiDrawText(1, 16, 152, 195, 121, 18, 23, 30, ctx);
+  } else if (g_room.active) {
+    char ctx[64];
+    snprintf(ctx, sizeof(ctx), "#%s", g_room.currentName);
+    uiDrawText(1, 16, 152, 195, 121, 18, 23, 30, ctx);
+  } else {
+    uiDrawText(1, 16, 233, 196, 106, 18, 23, 30, "Lobby");
+  }
+  char tokenText[32];
+  snprintf(tokenText, sizeof(tokenText), "%.8s...", g_identity.token);
+  uiDrawText(1, cols - 16, 127, 140, 156, 18, 23, 30, tokenText);
+
+  uiDrawBox(1, 2, messageW, messageH, "Conversation");
+  uiDrawBox(messageW + 2, 2, sidebar, messageH, "Sidebar");
+  uiDrawBox(1, rows - 2, cols - 1, 3, "Command");
+
+  uiDrawMessages(1, 2, messageW, messageH);
+  uiDrawSidebar(messageW + 2, 2, sidebar, messageH);
+  uiDrawInput(1, rows - 2, cols - 1, 3);
+
+  if (g_showHelp)
+    uiDrawHelp(rows, cols);
+
+  fflush(stdout);
+}
+
+typedef enum {
+  KEY_NONE,
+  KEY_CHAR,
+  KEY_ENTER,
+  KEY_BACKSPACE,
+  KEY_UP,
+  KEY_DOWN,
+  KEY_PGUP,
+  KEY_PGDN,
+  KEY_HELP
+} KeyType;
+
+typedef struct {
+  KeyType type;
+  char ch;
+} KeyEvent;
+
+static KeyEvent readKeyEvent(void) {
+  char c = 0;
+  ssize_t n = read(STDIN_FILENO, &c, 1);
+  if (n <= 0)
+    return (KeyEvent){KEY_NONE, 0};
+
+  if (c == '\r' || c == '\n')
+    return (KeyEvent){KEY_ENTER, 0};
+  if (c == 127 || c == 8)
+    return (KeyEvent){KEY_BACKSPACE, 0};
+  if (c == '?')
+    return (KeyEvent){KEY_HELP, 0};
+  if (c == 27) {
+    char seq[3] = {0};
+    if (read(STDIN_FILENO, &seq[0], 1) <= 0)
+      return (KeyEvent){KEY_NONE, 0};
+    if (read(STDIN_FILENO, &seq[1], 1) <= 0)
+      return (KeyEvent){KEY_NONE, 0};
+    if (seq[0] == '[') {
+      if (seq[1] == 'A')
+        return (KeyEvent){KEY_UP, 0};
+      if (seq[1] == 'B')
+        return (KeyEvent){KEY_DOWN, 0};
+      if (seq[1] == '5') {
+        read(STDIN_FILENO, &seq[2], 1);
+        return (KeyEvent){KEY_PGUP, 0};
+      }
+      if (seq[1] == '6') {
+        read(STDIN_FILENO, &seq[2], 1);
+        return (KeyEvent){KEY_PGDN, 0};
+      }
+    }
+    return (KeyEvent){KEY_NONE, 0};
+  }
+  if (isprint((unsigned char)c))
+    return (KeyEvent){KEY_CHAR, c};
+  return (KeyEvent){KEY_NONE, 0};
+}
+
+static void handleTokenCommand(void) {
+  addMessage(UI_MSG_INFO, "[*] Your token: %s", g_identity.token);
+}
+
+static void handleListCommand(void) {
+  reloadDmHistoryIndex();
+  addMessage(UI_MSG_INFO, "[*] Loaded %d DM conversations", g_dmCount);
+}
+
+static void handleNickCommand(const char *target, const char *nick) {
+  reloadDmHistoryIndex();
+  int idx = findDmByReference(target);
+  if (idx < 0) {
+    addMessage(UI_MSG_ERROR, "[!] DM not found");
+    return;
+  }
+
+  for (size_t i = 0; nick[i]; i++) {
+    unsigned char ch = (unsigned char)nick[i];
+    if (!(isalnum(ch) || ch == '-' || ch == '_')) {
+      addMessage(UI_MSG_ERROR, "[!] Nicknames may use letters, digits, - and _");
+      return;
+    }
+  }
+
+  snprintf(g_dmNick[idx], sizeof(g_dmNick[idx]), "%s", nick);
+  saveDmNicknames();
+  addMessage(UI_MSG_INFO, "[*] Nickname saved");
+}
+
+static void handleDmCommand(const char *input) {
+  reloadDmHistoryIndex();
+
+  char token[TOKEN_STR_SIZE] = {0};
+  if (strlen(input) == TOKEN_HEX_LEN) {
+    snprintf(token, sizeof(token), "%s", input);
+  } else {
+    int idx = findDmByReference(input);
+    if (idx < 0) {
+      addMessage(UI_MSG_ERROR, "[!] Unknown DM reference");
+      return;
+    }
+    snprintf(token, sizeof(token), "%s", g_dmList[idx]);
+  }
+
+  unsigned char myPub[32];
+  unsigned char myPriv[32];
+  if (!x25519GenerateKeypair(myPub, myPriv)) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to generate DM session keys");
+    return;
+  }
+
+  char myPubHex[65];
+  bytesToHex(myPub, sizeof(myPub), myPubHex);
+  unsigned char sig[SIG_BYTES];
+  if (!signDmFrame("DM_INIT", g_identity.token, token, myPubHex, sig)) {
+    addMessage(UI_MSG_ERROR, "[!] Failed to sign DM request");
+    memset(myPriv, 0, sizeof(myPriv));
+    return;
+  }
+
+  char sigHex[SIG_HEX_SIZE];
+  bytesToHex(sig, sizeof(sig), sigHex);
+  char frame[MSG_SIZE];
+  snprintf(frame, sizeof(frame), "DM_INIT|%s|%s|%s\n", token, myPubHex, sigHex);
+  if (!sendRawFrame(frame)) {
+    memset(myPriv, 0, sizeof(myPriv));
+    addMessage(UI_MSG_ERROR, "[!] Failed to send DM request");
+    return;
+  }
+
+  clearDmSession();
+  g_dm.awaitingAck = true;
+  snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", token);
+  memcpy(g_dm.pendingPriv, myPriv, sizeof(g_dm.pendingPriv));
+  memcpy(g_dm.pendingPub, myPub, sizeof(g_dm.pendingPub));
+  memset(myPriv, 0, sizeof(myPriv));
+  rememberDmToken(token);
+  addMessage(UI_MSG_INFO, "[*] DM request sent");
+}
+
+static bool processCommand(char *message) {
+  if (!message[0])
+    return true;
+
+  if (strcmp(message, "/exit") == 0) {
+    sendRawFrame("QUIT\n");
+    return false;
+  }
+  if (strcmp(message, "/help") == 0) {
+    g_showHelp = !g_showHelp;
+    return true;
+  }
+  if (strncmp(message, "/name ", 6) == 0) {
+    char name[MAX_NAME_LEN];
+    if (sscanf(message + 6, "%63s", name) != 1 || !protocolIsSafeIdentifier(name)) {
+      addMessage(UI_MSG_ERROR, "[!] Invalid name");
+      return true;
+    }
+    snprintf(g_username, sizeof(g_username), "%s", name);
+    identitySaveUsername(name);
+    char frame[MSG_SIZE];
+    snprintf(frame, sizeof(frame), "SET_NAME|%s\n", name);
+    sendRawFrame(frame);
+    return true;
+  }
+  if (strcmp(message, "/rooms") == 0) {
+    sendRawFrame("ROOM_LIST\n");
+    return true;
+  }
+  if (strncmp(message, "/create ", 8) == 0) {
+    char room[MAX_NAME_LEN];
+    char secret[256];
+    if (strstr(message + 8, " -p ") != NULL) {
+      if (sscanf(message + 8, "%63s -p %255s", room, secret) != 2) {
+        addMessage(UI_MSG_ERROR, "[!] Usage: /create <room> -p <secret>");
+        return true;
+      }
+      char saltHex[ROOM_SALT_HEX_SIZE];
+      char verifierHex[SHA256_HEX_SIZE];
+      unsigned char roomKey[32];
+      if (!createRoomSecrets(room, secret, saltHex, verifierHex, roomKey)) {
+        addMessage(UI_MSG_ERROR, "[!] Failed to create room secret material");
+        return true;
+      }
+      char frame[MSG_SIZE];
+      snprintf(frame, sizeof(frame), "ROOM_CREATE|%s|PROTECTED|%s|%s\n", room,
+               saltHex, verifierHex);
+      sendRawFrame(frame);
+      return true;
+    }
+    if (sscanf(message + 8, "%63s", room) != 1) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /create <room>");
+      return true;
+    }
+    char frame[MSG_SIZE];
+    snprintf(frame, sizeof(frame), "ROOM_CREATE|%s|OPEN\n", room);
+    sendRawFrame(frame);
+    return true;
+  }
+  if (strncmp(message, "/enter ", 7) == 0) {
+    char room[MAX_NAME_LEN];
+    if (sscanf(message + 7, "%63s", room) != 1) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /enter <room>");
+      return true;
+    }
+    snprintf(g_room.pendingName, sizeof(g_room.pendingName), "%s", room);
+    char frame[MSG_SIZE];
+    snprintf(frame, sizeof(frame), "ROOM_ENTER|%s\n", room);
+    sendRawFrame(frame);
+    return true;
+  }
+  if (strcmp(message, "/leave") == 0) {
+    sendRawFrame("ROOM_LEAVE\n");
+    return true;
+  }
+  if (strcmp(message, "/list") == 0) {
+    handleListCommand();
+    return true;
+  }
+  if (strcmp(message, "/token") == 0) {
+    handleTokenCommand();
+    return true;
+  }
+  if (strcmp(message, "/dmleave") == 0) {
+    clearDmSession();
+    addMessage(UI_MSG_INFO, "[*] DM session closed");
+    return true;
+  }
+  if (strncmp(message, "/dm ", 4) == 0) {
+    char target[128];
+    if (sscanf(message + 4, "%127s", target) != 1) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /dm <token|nick|prefix>");
+      return true;
+    }
+    handleDmCommand(target);
+    return true;
+  }
+  if (strncmp(message, "/nick ", 6) == 0) {
+    char target[128];
+    char nick[MAX_NAME_LEN];
+    if (sscanf(message + 6, "%127s %63s", target, nick) != 2) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /nick <target> <name>");
+      return true;
+    }
+    handleNickCommand(target, nick);
+    return true;
+  }
+
+  if (g_dm.active) {
+    if (encryptAndSendDm(message)) {
+      historyAppend(g_dm.peerToken, true, message);
+      addTimestamped(UI_MSG_SELF, g_username, message);
+    } else {
+      addMessage(UI_MSG_ERROR, "[!] Failed to send DM");
     }
     return true;
+  }
+
+  if (!g_room.active) {
+    addMessage(UI_MSG_INFO, "[*] Join a room or start a DM first");
+    return true;
+  }
+
+  if (encryptAndSendRoom(message))
+    addTimestamped(UI_MSG_SELF, g_username, message);
+  else
+    addMessage(UI_MSG_ERROR, "[!] Failed to send room message");
+  return true;
+}
+
+static void handleKey(KeyEvent key) {
+  if (key.type == KEY_HELP) {
+    g_showHelp = !g_showHelp;
+    return;
+  }
+  if (key.type == KEY_UP) {
+    g_messageScroll++;
+    return;
+  }
+  if (key.type == KEY_DOWN) {
+    g_messageScroll--;
+    if (g_messageScroll < 0)
+      g_messageScroll = 0;
+    return;
+  }
+  if (key.type == KEY_PGUP) {
+    g_messageScroll += 10;
+    return;
+  }
+  if (key.type == KEY_PGDN) {
+    g_messageScroll -= 10;
+    if (g_messageScroll < 0)
+      g_messageScroll = 0;
+    return;
+  }
+
+  if (g_input.readingRoomSecret) {
+    if (key.type == KEY_ENTER) {
+      finalizeRoomSecretEntry();
+      return;
+    }
+    if (key.type == KEY_BACKSPACE && g_input.roomSecretLen > 0) {
+      g_input.roomSecret[--g_input.roomSecretLen] = '\0';
+      return;
+    }
+    if (key.type == KEY_CHAR && g_input.roomSecretLen < MSG_SIZE - 1) {
+      g_input.roomSecret[g_input.roomSecretLen++] = key.ch;
+      g_input.roomSecret[g_input.roomSecretLen] = '\0';
+    }
+    return;
+  }
+
+  if (key.type == KEY_ENTER) {
+    char message[MSG_SIZE];
+    snprintf(message, sizeof(message), "%s", g_input.buffer);
+    g_input.buffer[0] = '\0';
+    g_input.length = 0;
+    if (!processCommand(message))
+      g_input.connected = false;
+    return;
+  }
+  if (key.type == KEY_BACKSPACE && g_input.length > 0) {
+    g_input.buffer[--g_input.length] = '\0';
+    return;
+  }
+  if (key.type == KEY_CHAR && g_input.length < MSG_SIZE - 1) {
+    g_input.buffer[g_input.length++] = key.ch;
+    g_input.buffer[g_input.length] = '\0';
+  }
+}
+
+static void eventLoop(void) {
+  while (true) {
+    pthread_mutex_lock(&g_stateMutex);
+    bool connected = g_input.connected;
+    renderUi();
+    pthread_mutex_unlock(&g_stateMutex);
+    if (!connected)
+      break;
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
+
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 50000;
+    int rc = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+    if (rc > 0 && FD_ISSET(STDIN_FILENO, &rfds)) {
+      KeyEvent key = readKeyEvent();
+      pthread_mutex_lock(&g_stateMutex);
+      handleKey(key);
+      pthread_mutex_unlock(&g_stateMutex);
+    }
+  }
 }
 
 static bool connectToServer(const char *ip, int port) {
-    g_socketFD = createTCPSocket();
-    if (g_socketFD < 0) return false;
-    struct addrinfo hints = {0};
-    struct addrinfo *servinfo = NULL;
-    char portStr[16];
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(portStr, sizeof(portStr), "%d", port);
-    if (getaddrinfo(ip, portStr, &hints, &servinfo) != 0 || !servinfo) {
-        close(g_socketFD);
-        return false;
-    }
-    char resolvedIP[INET_ADDRSTRLEN];
-    struct sockaddr_in *ipv4 = (struct sockaddr_in *)servinfo->ai_addr;
-    inet_ntop(AF_INET, &ipv4->sin_addr, resolvedIP, sizeof(resolvedIP));
-    freeaddrinfo(servinfo);
-    SocketAddress *address = createSocketAddress(resolvedIP, port, true);
-    if (!address) {
-        close(g_socketFD);
-        return false;
-    }
-    if (connectSocket(g_socketFD, address) != 0) {
-        close(g_socketFD);
-        free(address);
-        return false;
-    }
+  g_socketFD = createTCPSocket();
+  if (g_socketFD == INVALID_SOCKET_HANDLE)
+    return false;
+
+  struct addrinfo hints = {0};
+  struct addrinfo *servinfo = NULL;
+  char portStr[16];
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  snprintf(portStr, sizeof(portStr), "%d", port);
+  if (getaddrinfo(ip, portStr, &hints, &servinfo) != 0 || !servinfo)
+    return false;
+
+  char resolvedIP[INET_ADDRSTRLEN];
+  struct sockaddr_in *ipv4 = (struct sockaddr_in *)servinfo->ai_addr;
+  inet_ntop(AF_INET, &ipv4->sin_addr, resolvedIP, sizeof(resolvedIP));
+  freeaddrinfo(servinfo);
+
+  SocketAddress *address = createSocketAddress(resolvedIP, port, true);
+  if (!address)
+    return false;
+  if (connectSocket(g_socketFD, address) != 0) {
     free(address);
-    SSL_CTX *ctx = tlsClientCtxCreate();
-    if (!ctx) {
-        close(g_socketFD);
-        return false;
-    }
-    g_ssl = tlsClientConnect(ctx, g_socketFD);
-    SSL_CTX_free(ctx);
-    if (!g_ssl) {
-        close(g_socketFD);
-        return false;
-    }
-    clientLog("connectToServer: TLS connected to %s:%d", ip, port);
-    return true;
+    return false;
+  }
+  free(address);
+
+  SSL_CTX *ctx = tlsClientCtxCreate();
+  if (!ctx)
+    return false;
+  g_ssl = tlsClientConnect(ctx, g_socketFD);
+  SSL_CTX_free(ctx);
+  if (!g_ssl)
+    return false;
+
+  char serverLabel[128];
+  snprintf(serverLabel, sizeof(serverLabel), "%s:%d", ip, port);
+  if (!tlsTrustOnFirstUse(g_ssl, serverLabel)) {
+    tlsFree(g_ssl);
+    g_ssl = NULL;
+    return false;
+  }
+
+  return true;
 }
 
 static bool authenticate(void) {
-    char challengeBuf[MSG_SIZE];
-    ssize_t n = tlsRecv(g_ssl, challengeBuf, sizeof(challengeBuf));
-    if (n <= 0 || strncmp(challengeBuf, "CHALLENGE:", 10) != 0 ||
-        strlen(challengeBuf) < 10 + CHALLENGE_HEX_LEN) {
-        return false;
-    }
-    const char *hexNonce = challengeBuf + 10;
-    unsigned char nonce[CHALLENGE_BYTES];
-    bool ok = true;
-    for (int i = 0; i < CHALLENGE_BYTES && ok; i++) {
-        int hi = -1, lo = -1;
-        char hc = hexNonce[i * 2], lc = hexNonce[i * 2 + 1];
-        if (hc >= '0' && hc <= '9') hi = hc - '0';
-        else if (hc >= 'a' && hc <= 'f') hi = hc - 'a' + 10;
-        else if (hc >= 'A' && hc <= 'F') hi = hc - 'A' + 10;
-        else ok = false;
-        if (lc >= '0' && lc <= '9') lo = lc - '0';
-        else if (lc >= 'a' && lc <= 'f') lo = lc - 'a' + 10;
-        else if (lc >= 'A' && lc <= 'F') lo = lc - 'A' + 10;
-        else ok = false;
-        if (ok) nonce[i] = (unsigned char)((hi << 4) | lo);
-    }
-    if (!ok) return false;
-    unsigned char sig[SIG_BYTES];
-    if (!identitySign(&g_identity, nonce, CHALLENGE_BYTES, sig)) return false;
-    static const char hx[] = "0123456789abcdef";
-    char sigHex[SIG_HEX_SIZE];
-    for (int i = 0; i < SIG_BYTES; i++) {
-        sigHex[i * 2] = hx[sig[i] >> 4];
-        sigHex[i * 2 + 1] = hx[sig[i] & 0xf];
-    }
-    sigHex[SIG_HEX_LEN] = '\0';
-    char authMsg[MSG_SIZE];
-    snprintf(authMsg, sizeof(authMsg), "AUTH:%s:%s\n", g_identity.token, sigHex);
-    if (!tlsSend(g_ssl, authMsg, strlen(authMsg))) return false;
-    char ackBuf[MSG_SIZE];
-    n = tlsRecv(g_ssl, ackBuf, sizeof(ackBuf));
-    if (n <= 0 || strncmp(ackBuf, "RESAuthenticated", 16) != 0) return false;
-    clientLog("auth: authenticated successfully");
-    return true;
-}
-
-static void drawSidebar(void) {
-    if (!g_sidebarWin) return;
-    werase(g_sidebarWin);
-
-    box(g_sidebarWin, 0, 0);
-
-    mvwaddstr(g_sidebarWin, 1, 2, "Rooms:");
-    for (int i = 0; i < g_roomCount; i++) {
-        int y = 3 + i;
-        if (y >= getmaxy(g_sidebarWin) - 1) break;
-        if (i == g_selectedRoom)
-            wattron(g_sidebarWin, A_REVERSE | COLOR_PAIR(COLOR_PAIR_ACTIVE));
-        if (strcmp(g_rooms[i], g_currentRoom) == 0) {
-            wattron(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_ROOM));
-        }
-        mvwaddstr(g_sidebarWin, y, 4, g_rooms[i]);
-        if (strcmp(g_rooms[i], g_currentRoom) == 0)
-            wattroff(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_ROOM));
-        if (i == g_selectedRoom)
-            wattroff(g_sidebarWin, A_REVERSE | COLOR_PAIR(COLOR_PAIR_ACTIVE));
-    }
-
-    int dmStart = 3 + g_roomCount + 1;
-    if (dmStart < getmaxy(g_sidebarWin) - 2) {
-        mvwaddstr(g_sidebarWin, dmStart, 2, "DMs:");
-        for (int i = 0; i < g_dmCount; i++) {
-            int y = dmStart + 2 + i;
-            if (y >= getmaxy(g_sidebarWin) - 1) break;
-            if (i == g_selectedDm)
-                wattron(g_sidebarWin, A_REVERSE | COLOR_PAIR(COLOR_PAIR_ACTIVE));
-            if (g_dm.active && strcmp(g_dmList[i], g_dm.peerToken) == 0) {
-                wattron(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_DM));
-            }
-            char dmDisplay[MAX_NAME_LEN];
-            if (g_dmNick[i][0]) {
-                snprintf(dmDisplay, sizeof(dmDisplay), "%s", g_dmNick[i]);
-            } else {
-                snprintf(dmDisplay, sizeof(dmDisplay), "%.10s", g_dmList[i]);
-            }
-            mvwaddstr(g_sidebarWin, y, 4, dmDisplay);
-            if (g_dm.active && strcmp(g_dmList[i], g_dm.peerToken) == 0)
-                wattroff(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_DM));
-            if (i == g_selectedDm)
-                wattroff(g_sidebarWin, A_REVERSE | COLOR_PAIR(COLOR_PAIR_ACTIVE));
-        }
-    }
-
-    wattroff(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_ROOM));
-    wattroff(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_DM));
-    wattroff(g_sidebarWin, A_REVERSE);
-    wattroff(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_ACTIVE));
-
-    wnoutrefresh(g_sidebarWin);
-}
-
-static void drawMessages(void) {
-    if (!g_msgWin) return;
-    werase(g_msgWin);
-
-    int winH = getmaxy(g_msgWin);
-
-    int visibleLines = winH - 2;
-    int maxScroll = g_msgCount > visibleLines ? g_msgCount - visibleLines : 0;
-    if (g_msgScroll > maxScroll) g_msgScroll = maxScroll;
-    if (g_msgScroll < 0) g_msgScroll = 0;
-
-    int startIdx = g_msgScroll;
-    int idx = 0;
-
-    MessageNode *node = g_msgHead;
-    while (node && idx < startIdx) {
-        node = node->next;
-        idx++;
-    }
-
-    int y = 1;
-    while (node && y < winH - 1) {
-        char *line = node->text;
-        char *token = NULL;
-        if (strncmp(line, "[!] ", 4) == 0) {
-            wattron(g_msgWin, COLOR_PAIR(COLOR_PAIR_ERROR));
-            token = "[!] ";
-        } else if (strncmp(line, "[*] ", 4) == 0) {
-            wattron(g_msgWin, COLOR_PAIR(COLOR_PAIR_NOTIF));
-            token = "[*] ";
-        } else if (line[0] == '[' && (line[1] >= '0' && line[1] <= '9')) {
-            wattron(g_msgWin, COLOR_PAIR(COLOR_PAIR_MSG));
-        }
-
-        if (token) {
-            mvwaddstr(g_msgWin, y, 1, token);
-            mvwaddstr(g_msgWin, y, 4, line + 4);
-        } else {
-            mvwaddstr(g_msgWin, y, 1, line);
-        }
-
-        if (strncmp(line, "[!] ", 4) == 0)
-            wattroff(g_msgWin, COLOR_PAIR(COLOR_PAIR_ERROR));
-        else if (strncmp(line, "[*] ", 4) == 0)
-            wattroff(g_msgWin, COLOR_PAIR(COLOR_PAIR_NOTIF));
-        else if (line[0] == '[' && (line[1] >= '0' && line[1] <= '9'))
-            wattroff(g_msgWin, COLOR_PAIR(COLOR_PAIR_MSG));
-
-        node = node->next;
-        y++;
-    }
-
-    wnoutrefresh(g_msgWin);
-}
-
-static void drawInput(void) {
-    if (!g_inputWin) return;
-    werase(g_inputWin);
-    box(g_inputWin, ACS_VLINE, ACS_HLINE);
-
-    pthread_mutex_lock(&g_inputMutex);
-    int winW = getmaxx(g_inputWin) - 4;
-    if (winW > 0) {
-        size_t printLen = g_inputState.length;
-        if (printLen > (size_t)winW) printLen = (size_t)winW;
-        char clipped[MSG_SIZE];
-        memcpy(clipped, g_inputState.buffer, printLen);
-        clipped[printLen] = '\0';
-        mvwaddstr(g_inputWin, 1, 2, clipped);
-        wmove(g_inputWin, 1, 2 + printLen);
-    }
-    pthread_mutex_unlock(&g_inputMutex);
-
-    wnoutrefresh(g_inputWin);
-}
-
-static void drawTopBar(void) {
-    int titleY = 0;
-    mvaddstr(titleY, 0, "SocketChat E2E");
-    attron(COLOR_PAIR(COLOR_PAIR_NOTIF));
-    mvaddstr(titleY, g_maxX - 12, "[?/help]");
-    attroff(COLOR_PAIR(COLOR_PAIR_NOTIF));
-
-    char tokenStr[32];
-    snprintf(tokenStr, sizeof(tokenStr), "Token: %.8s...", g_identity.token);
-    mvaddstr(titleY, g_maxX - 28, tokenStr);
-
-    if (g_msgCount > 0) {
-        int winH = getmaxy(g_msgWin) - 2;
-        int maxScroll = g_msgCount > winH ? g_msgCount - winH : 0;
-        int pct = maxScroll > 0 ? (g_msgScroll * 100) / maxScroll : 100;
-        char scrollStr[16];
-        if (g_msgScroll == 0)
-            snprintf(scrollStr, sizeof(scrollStr), "bot");
-        else if (g_msgScroll >= maxScroll)
-            snprintf(scrollStr, sizeof(scrollStr), "top");
-        else
-            snprintf(scrollStr, sizeof(scrollStr), "%d%%", pct);
-        attron(COLOR_PAIR(COLOR_PAIR_PROMPT));
-        mvaddstr(titleY, g_sidebarX + 2, scrollStr);
-        attroff(COLOR_PAIR(COLOR_PAIR_PROMPT));
-    }
-
-    mvaddch(titleY, g_sidebarX - 1, ACS_VLINE);
-    for (int y = 1; y < g_maxY - 1; y++)
-        mvaddch(y, g_sidebarX - 1, ACS_VLINE);
-
-    refresh();
-}
-
-static void drawHelp(void) {
-    if (!g_showHelp) return;
-    if (g_helpWin) {
-        delwin(g_helpWin);
-    }
-
-    int helpH = 18;
-    int helpW = 55;
-    int helpY = (g_maxY - helpH) / 2;
-    int helpX = (g_maxX - helpW) / 2;
-
-    g_helpWin = newwin(helpH, helpW, helpY, helpX);
-    wbkgd(g_helpWin, COLOR_PAIR(COLOR_PAIR_NOTIF));
-    box(g_helpWin, 0, 0);
-
-    wattron(g_helpWin, A_BOLD);
-    mvwaddstr(g_helpWin, 1, 2, "Commands");
-    wattroff(g_helpWin, A_BOLD);
-
-    mvwaddstr(g_helpWin, 3, 2, "/help              - Show this help");
-    mvwaddstr(g_helpWin, 4, 2, "/name <username>   - Set your display name");
-    mvwaddstr(g_helpWin, 5, 2, "/create <room>    - Create a room");
-    mvwaddstr(g_helpWin, 6, 2, "/create <room> -p <pass> - Create encrypted room");
-    mvwaddstr(g_helpWin, 7, 2, "/enter <room>    - Enter a room");
-    mvwaddstr(g_helpWin, 8, 2, "/leave           - Leave current room");
-    mvwaddstr(g_helpWin, 9, 2, "/rooms           - List available rooms");
-    mvwaddstr(g_helpWin, 10, 2, "/dm <1|token>   - Start a DM");
-    mvwaddstr(g_helpWin, 11, 2, "/dmleave        - Leave DM session");
-    mvwaddstr(g_helpWin, 12, 2, "/list           - List DM conversations");
-    mvwaddstr(g_helpWin, 13, 2, "/nick <n|token> <name> - Rename a DM");
-    mvwaddstr(g_helpWin, 14, 2, "/token          - Show your token");
-    mvwaddstr(g_helpWin, 14, 2, "/clear          - Clear messages");
-    mvwaddstr(g_helpWin, 15, 2, "/exit           - Disconnect and quit");
-    mvwaddstr(g_helpWin, 16, 2, "Esc              - Close this help");
-
-    wnoutrefresh(g_helpWin);
-}
-
-static void refreshAll(void) {
-    drawTopBar();
-    drawMessages();
-    drawSidebar();
-    drawInput();
-    drawHelp();
-    doupdate();
-}
-
-static void resizeWindows(void) {
-    endwin();
-    refresh();
-    clear();
-    getmaxyx(stdscr, g_maxY, g_maxX);
-    g_sidebarX = g_maxX - 40;
-    if (g_sidebarX < 15) g_sidebarX = 15;
-
-    if (g_inputWin) {
-        delwin(g_inputWin);
-        g_inputWin = NULL;
-    }
-    if (g_msgWin) {
-        delwin(g_msgWin);
-        g_msgWin = NULL;
-    }
-    if (g_sidebarWin) {
-        delwin(g_sidebarWin);
-        g_sidebarWin = NULL;
-    }
-    if (g_helpWin) {
-        delwin(g_helpWin);
-        g_helpWin = NULL;
-    }
-
-    g_inputWin = newwin(5, g_sidebarX - 1, g_maxY - 5, 0);
-    g_msgWin = newwin(g_maxY - 5 - 1, g_sidebarX - 1, 1, 0);
-    g_sidebarWin = newwin(g_maxY - 5, g_maxX - g_sidebarX, 1, g_sidebarX);
-
-    if (g_inputWin) {
-        wbkgd(g_inputWin, COLOR_PAIR(COLOR_PAIR_PROMPT));
-    }
-    if (g_msgWin) {
-        wbkgd(g_msgWin, COLOR_PAIR(COLOR_PAIR_MSG));
-    }
-    if (g_sidebarWin) {
-        wbkgd(g_sidebarWin, COLOR_PAIR(COLOR_PAIR_MSG));
-    }
-}
-
-static void handleKeyInput(int key) {
-    pthread_mutex_lock(&g_inputMutex);
-    bool readingPw = g_readingPassword;
-    pthread_mutex_unlock(&g_inputMutex);
-
-    if (readingPw) {
-        if (key == '\n' || key == '\r') {
-            finalizePasswordEntry();
-        } else if (key == 127 || key == 8) {
-            if (g_passwordLen > 0) {
-                g_passwordLen--;
-                g_passwordBuffer[g_passwordLen] = '\0';
-            }
-        } else if (isprint(key) && g_passwordLen < MSG_SIZE - 1) {
-            g_passwordBuffer[g_passwordLen++] = key;
-            g_passwordBuffer[g_passwordLen] = '\0';
-        }
-        return;
-    }
-
-    if (g_showHelp) {
-        curs_set(0);
-        if (key == 27 || key == KEY_F(1)) {
-            g_showHelp = false;
-            curs_set(1);
-            if (g_helpWin) {
-                delwin(g_helpWin);
-                g_helpWin = NULL;
-            }
-            return;
-        }
-        return;
-    }
-
-    if (key == 27) {
-        g_showHelp = false;
-        return;
-    }
-
-    if (key == KEY_F(1) || (g_inputState.length > 0 && g_inputState.buffer[0] == '?' &&
-        (g_inputState.length == 1 ||
-         (g_inputState.length == 1 && g_inputState.buffer[0] == '/' &&
-          (g_inputState.length > 1 || key == 'h'))))) {
-        if (key == KEY_F(1) || (g_inputState.length >= 1 && g_inputState.buffer[0] == '?')) {
-            g_showHelp = true;
-            return;
-        }
-    }
-
-    if (key == '\n' || key == '\r') {
-        g_inputState.buffer[g_inputState.length] = '\0';
-        char msg[MSG_SIZE];
-        snprintf(msg, sizeof(msg), "%s", g_inputState.buffer);
-
-        pthread_mutex_lock(&g_inputMutex);
-        g_inputState.buffer[0] = '\0';
-        g_inputState.length = 0;
-        pthread_mutex_unlock(&g_inputMutex);
-
-        if (strcmp(msg, "/exit") == 0) {
-            sendToServer("/exit\n");
-            pthread_mutex_lock(&g_inputMutex);
-            g_connected = false;
-            pthread_mutex_unlock(&g_inputMutex);
-            return;
-        }
-
-        if (strncmp(msg, "/name ", 6) == 0) {
-            char newName[MAX_NAME_LEN] = {0};
-            sscanf(msg + 6, "%63s", newName);
-            if (newName[0] == '\0') {
-                addMessage("[*] Usage: /name <username>");
-                return;
-            }
-            snprintf(g_username, sizeof(g_username), "%s", newName);
-            identitySaveUsername(newName);
-            char toSend[MSG_SIZE];
-            size_t toSendLen = strlen(msg);
-            if (toSendLen >= MSG_SIZE - 1) toSendLen = MSG_SIZE - 2;
-            memcpy(toSend, msg, toSendLen);
-            toSend[toSendLen] = '\n';
-            toSend[toSendLen + 1] = '\0';
-            sendToServer(toSend);
-            return;
-        }
-
-        if (strncmp(msg, "/create ", 8) == 0) {
-            if (g_dm.active) {
-                clearDmSession();
-            }
-            char toSend[MSG_SIZE];
-            size_t toSendLen = strlen(msg);
-            if (toSendLen >= MSG_SIZE - 1) toSendLen = MSG_SIZE - 2;
-            memcpy(toSend, msg, toSendLen);
-            toSend[toSendLen] = '\n';
-            toSend[toSendLen + 1] = '\0';
-            sendToServer(toSend);
-            g_expectServerResponse = true;
-            return;
-        }
-
-        if (strncmp(msg, "/enter ", 7) == 0) {
-            if (g_dm.active) {
-                clearDmSession();
-            }
-            char roomName[MAX_NAME_LEN] = {0};
-            sscanf(msg + 7, "%63s", roomName);
-            memset(&g_pendingRoom, 0, sizeof(g_pendingRoom));
-            snprintf(g_pendingRoom.roomName, sizeof(g_pendingRoom.roomName), "%s", roomName);
-            g_pendingRoom.pending = true;
-            pthread_mutex_lock(&g_inputMutex);
-            g_waitingForRoomJoin = true;
-            pthread_mutex_unlock(&g_inputMutex);
-            char toSend[MSG_SIZE];
-            size_t toSendLen = strlen(msg);
-            if (toSendLen >= MSG_SIZE - 1) toSendLen = MSG_SIZE - 2;
-            memcpy(toSend, msg, toSendLen);
-            toSend[toSendLen] = '\n';
-            toSend[toSendLen + 1] = '\0';
-            sendToServer(toSend);
-            g_expectServerResponse = true;
-            return;
-        }
-
-        if (strcmp(msg, "/leave") == 0) {
-            if (g_dm.active) {
-                clearDmSession();
-                addMessage("[*] DM session closed");
-                return;
-            }
-            if (g_inRoom) {
-                clearRoomState();
-                sendToServer("/leave\n");
-            } else {
-                addMessage("[*] Not in a room");
-            }
-            return;
-        }
-
-        if (strcmp(msg, "/dmleave") == 0) {
-            if (!g_dm.active) {
-                addMessage("[*] Not in a DM session");
-                return;
-            }
-            clearDmSession();
-            addMessage("[*] DM session closed");
-            return;
-        }
-
-        if (strncmp(msg, "/nick ", 6) == 0) {
-            char tokenOrNum[TOKEN_STR_SIZE] = {0};
-            char nick[MAX_NAME_LEN] = {0};
-            sscanf(msg + 6, "%64s %63s", tokenOrNum, nick);
-            size_t toknLen = strlen(tokenOrNum);
-
-            if (toknLen == 0 || nick[0] == '\0') {
-                addMessage("[*] Usage: /nick <token|number> <name>");
-                return;
-            }
-
-            for (int i = 0; nick[i]; i++) {
-                if (!isalnum((unsigned char)nick[i]) && nick[i] != '_' && nick[i] != '-') {
-                    addMessage("[!] Name can only contain letters, numbers, _ and -");
-                    return;
-                }
-            }
-
-            int targetIdx = -1;
-            if (toknLen >= 2 && tokenOrNum[0] == '<' && tokenOrNum[toknLen-1] == '>') {
-                int idx = tokenOrNum[1] - '1';
-                if (toknLen == 3) {
-                    idx = tokenOrNum[1] - '1';
-                } else if (toknLen == 4 && isdigit(tokenOrNum[2])) {
-                    idx = (tokenOrNum[1] - '1') * 10 + (tokenOrNum[2] - '1');
-                    if (idx >= 9) idx = tokenOrNum[1] - '1';
-                }
-                if (idx >= 0 && idx < g_dmCount) {
-                    targetIdx = idx;
-                }
-            } else if (toknLen >= 1 && toknLen <= 2 && tokenOrNum[0] >= '1' && tokenOrNum[0] <= '9') {
-                targetIdx = tokenOrNum[0] - '1';
-                if (targetIdx >= g_dmCount) targetIdx = -1;
-            } else {
-                for (int i = 0; i < g_dmCount; i++) {
-                    if (strncmp(g_dmList[i], tokenOrNum, toknLen) == 0) {
-                        targetIdx = i;
-                        break;
-                    }
-                }
-            }
-
-            if (targetIdx == -1) {
-                addMessage("[!] DM not found");
-                return;
-            }
-
-            snprintf(g_dmNick[targetIdx], MAX_NAME_LEN, "%s", nick);
-            identitySaveDmNicks(g_dmNick, g_dmCount);
-            addMessage("[*] DM renamed");
-            return;
-        }
-
-        if (strncmp(msg, "/dm ", 4) == 0) {
-            char input[TOKEN_STR_SIZE] = {0};
-            sscanf(msg + 4, "%64s", input);
-            size_t inputLen = strlen(input);
-
-            if (inputLen >= 2 && input[0] == '<' && input[inputLen-1] == '>') {
-                int idx = input[1] - '1';
-                if (inputLen == 3) {
-                    idx = input[1] - '1';
-                } else if (inputLen == 4 && isdigit(input[2])) {
-                    idx = (input[1] - '1') * 10 + (input[2] - '1');
-                    if (idx >= 9) idx = input[1] - '1';
-                }
-                if (idx >= 0 && idx < g_dmCount) {
-                    snprintf(input, sizeof(input), "%s", g_dmList[idx]);
-                    inputLen = strlen(input);
-                } else {
-                    addMessage("[!] Invalid DM number");
-                    return;
-                }
-            }
-
-            if (inputLen < 10) {
-                int foundIdx = -1;
-                for (int i = 0; i < g_dmCount; i++) {
-                    if (g_dmNick[i][0] && strcmp(g_dmNick[i], input) == 0) {
-                        foundIdx = i;
-                        break;
-                    }
-                }
-                if (foundIdx == -1) {
-                    for (int i = 0; i < g_dmCount; i++) {
-                        if (strncmp(g_dmList[i], input, inputLen) == 0) {
-                            foundIdx = i;
-                            break;
-                        }
-                    }
-                }
-                if (foundIdx == -1) {
-                    addMessage("[!] Token/nickname must be at least 10 chars or a nickname");
-                    return;
-                }
-                snprintf(input, sizeof(input), "%s", g_dmList[foundIdx]);
-                inputLen = strlen(input);
-            }
-
-            char fullToken[TOKEN_STR_SIZE] = {0};
-            bool foundToken = false;
-            if (inputLen == TOKEN_HEX_LEN) {
-                snprintf(fullToken, sizeof(fullToken), "%s", input);
-                foundToken = true;
-            } else {
-                for (int i = 0; i < g_dmCount; i++) {
-                    if (strncmp(g_dmList[i], input, inputLen) == 0) {
-                        snprintf(fullToken, sizeof(fullToken), "%s", g_dmList[i]);
-                        foundToken = true;
-                        break;
-                    }
-                }
-            }
-            if (!foundToken) {
-                for (int i = 0; i < g_dmCount; i++) {
-                    if (g_dmNick[i][0] && strcmp(g_dmNick[i], input) == 0) {
-                        snprintf(fullToken, sizeof(fullToken), "%s", g_dmList[i]);
-                        foundToken = true;
-                        break;
-                    }
-                }
-            }
-            if (!foundToken) {
-                snprintf(fullToken, sizeof(fullToken), "%s", input);
-            }
-
-            unsigned char peerPubX25519[32];
-            if (!tokenToX25519PublicKey(fullToken, peerPubX25519)) {
-                addMessage("[!] Token contains invalid hex");
-                return;
-            }
-            unsigned char myPrivX25519[32];
-            if (!identityEd25519PrivToX25519(g_identity.priv, myPrivX25519)) {
-                addMessage("[!] Key conversion failed");
-                return;
-            }
-            unsigned char sharedKey[32];
-            bool ecdhOk = ecdhDeriveKey(myPrivX25519, peerPubX25519, sharedKey);
-            memset(myPrivX25519, 0, sizeof(myPrivX25519));
-            if (!ecdhOk) {
-                addMessage("[!] ECDH failed");
-                return;
-            }
-            clearRoomState();
-            clearDmSession();
-            g_dm.active = true;
-            snprintf(g_dm.peerToken, sizeof(g_dm.peerToken), "%s", fullToken);
-            memcpy(g_dm.key, sharedKey, 32);
-            char dmReq[MSG_SIZE];
-            snprintf(dmReq, sizeof(dmReq), "DM:%s:DM_REQ:%s\n", fullToken, g_identity.token);
-            sendToServer(dmReq);
-            g_selectedDm = -1;
-            for (int i = 0; i < g_dmCount; i++) {
-                if (strcmp(g_dmList[i], fullToken) == 0) {
-                    g_selectedDm = i;
-                    break;
-                }
-            }
-            if (g_selectedDm == -1 && g_dmCount < 50) {
-                snprintf(g_dmList[g_dmCount++], TOKEN_STR_SIZE, "%s", fullToken);
-                g_selectedDm = g_dmCount - 1;
-            }
-            addMessage("[*] DM session started");
-            return;
-        }
-
-        if (strcmp(msg, "/help") == 0) {
-            g_showHelp = true;
-            return;
-        }
-
-        if (strcmp(msg, "/rooms") == 0) {
-            sendToServer("/rooms\n");
-            return;
-        }
-
-        if (strcmp(msg, "/list") == 0) {
-            g_dmCount = historyGetAll(g_dmList);
-    identityLoadDmNicks(g_dmNick);
-            char out[MSG_SIZE];
-            snprintf(out, sizeof(out), "[*] Found %d DMs", g_dmCount);
-            addMessage(out);
-            return;
-        }
-
-        if (strcmp(msg, "/token") == 0) {
-            char tokenMsg[MSG_SIZE];
-            snprintf(tokenMsg, sizeof(tokenMsg), "[*] Your token: %s", g_identity.token);
-            addMessage(tokenMsg);
-            return;
-        }
-
-        if (strcmp(msg, "/clear") == 0) {
-            clearMessages();
-            return;
-        }
-
-        if (g_dm.active) {
-            if (msg[0] == '/') {
-                char toSend[MSG_SIZE];
-                size_t msgLen = strlen(msg);
-                size_t toSendLen = msgLen < MSG_SIZE - 2 ? msgLen : MSG_SIZE - 2;
-                memcpy(toSend, msg, toSendLen);
-                toSend[toSendLen] = '\n';
-                toSend[toSendLen + 1] = '\0';
-                sendToServer(toSend);
-                return;
-            }
-            if (!encryptAndSendDm(msg, strlen(msg))) {
-                addMessage("[!] Failed to encrypt DM");
-                return;
-            }
-            historyAppend(g_dm.peerToken, true, msg);
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char userMsg[MSG_SIZE * 2];
-            snprintf(userMsg, sizeof(userMsg), "[%s] %s: %s", ts, g_username, msg);
-            addMessage(userMsg);
-            g_expectServerResponse = true;
-            return;
-        }
-
-        if (!g_inRoom) {
-            addMessage("[*] Not in a room - use /enter <room>");
-            return;
-        }
-
-        if (g_encryption.hasKey) {
-            encryptAndSendRoom(msg, strlen(msg));
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char userMsg[MSG_SIZE * 2];
-            snprintf(userMsg, sizeof(userMsg), "[%s] %s: %s", ts, g_username, msg);
-            addMessage(userMsg);
-        } else {
-            char toSend[MSG_SIZE];
-            size_t toSendLen = strlen(msg);
-            if (toSendLen >= MSG_SIZE - 1) toSendLen = MSG_SIZE - 2;
-            memcpy(toSend, msg, toSendLen);
-            toSend[toSendLen] = '\n';
-            toSend[toSendLen + 1] = '\0';
-            sendToServer(toSend);
-            time_t now = time(NULL);
-            struct tm *tm_info = localtime(&now);
-            char ts[16] = "00:00";
-            if (tm_info) strftime(ts, sizeof(ts), "%H:%M", tm_info);
-            char userMsg[MSG_SIZE * 2];
-            snprintf(userMsg, sizeof(userMsg), "[%s] %s: %s", ts, g_username, msg);
-            addMessage(userMsg);
-        }
-
-        g_expectServerResponse = true;
-        return;
-    }
-
-if (key == 127 || key == 8 || key == KEY_BACKSPACE || key == 0x7F) {
-        if (g_inputState.length > 0) {
-            g_inputState.length--;
-            g_inputState.buffer[g_inputState.length] = '\0';
-        }
-    } else if (isprint(key) && g_inputState.length < MSG_SIZE - 1) {
-        g_inputState.buffer[g_inputState.length++] = key;
-        g_inputState.buffer[g_inputState.length] = '\0';
-    }
-}
-
-static void initNcurses(void) {
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    nodelay(stdscr, TRUE);
-    curs_set(1);
-
-    start_color();
-    use_default_colors();
-    init_pair(COLOR_PAIR_MSG, COLOR_CYAN, -1);
-    init_pair(COLOR_PAIR_NOTIF, COLOR_YELLOW, -1);
-    init_pair(COLOR_PAIR_ERROR, COLOR_RED, -1);
-    init_pair(COLOR_PAIR_PROMPT, COLOR_GREEN, -1);
-    init_pair(COLOR_PAIR_ROOM, COLOR_CYAN, -1);
-    init_pair(COLOR_PAIR_DM, COLOR_MAGENTA, -1);
-    init_pair(COLOR_PAIR_ACTIVE, COLOR_BLACK, COLOR_CYAN);
-
-    resizeWindows();
-}
-
-static void cleanupNcurses(void) {
-    if (g_helpWin) delwin(g_helpWin);
-    if (g_inputWin) delwin(g_inputWin);
-    if (g_msgWin) delwin(g_msgWin);
-    if (g_sidebarWin) delwin(g_sidebarWin);
-    endwin();
-}
-
-static void inputLoop(void) {
-    while (true) {
-        pthread_mutex_lock(&g_inputMutex);
-        bool connected = g_connected;
-        pthread_mutex_unlock(&g_inputMutex);
-        if (!connected) break;
-
-        int key = getch();
-
-        if (key == ERR) {
-            usleep(10000);
-            refreshAll();
-            continue;
-        }
-
-        if (key == KEY_RESIZE) {
-            resizeWindows();
-            refreshAll();
-            continue;
-        }
-
-        if (key == KEY_UP || key == 'K') {
-            g_msgScroll -= 3;
-            refreshAll();
-            continue;
-        }
-        if (key == KEY_DOWN || key == 'J') {
-            g_msgScroll += 3;
-            refreshAll();
-            continue;
-        }
-        if (key == KEY_PPAGE) {
-            g_msgScroll -= getmaxy(g_msgWin) - 2;
-            refreshAll();
-            continue;
-        }
-        if (key == KEY_NPAGE) {
-            g_msgScroll += getmaxy(g_msgWin) - 2;
-            refreshAll();
-            continue;
-        }
-        if (key == KEY_HOME || key == 'g') {
-            g_msgScroll = 0;
-            refreshAll();
-            continue;
-        }
-        if (key == 'G') {
-            g_msgScroll = g_msgCount;
-            refreshAll();
-            continue;
-        }
-
-        handleKeyInput(key);
-        refreshAll();
-    }
+  char challengeBuf[MSG_SIZE];
+  ssize_t n = tlsRecv(g_ssl, challengeBuf, sizeof(challengeBuf));
+  if (n <= 0)
+    return false;
+
+  char *parts[PROTOCOL_MAX_PARTS] = {0};
+  size_t partCount = protocolSplitFields(challengeBuf, parts, PROTOCOL_MAX_PARTS);
+  if (partCount < 2 || strcmp(parts[0], "CHALLENGE") != 0 ||
+      strlen(parts[1]) != CHALLENGE_HEX_LEN)
+    return false;
+
+  unsigned char nonce[CHALLENGE_BYTES];
+  if (!hexToBytes(parts[1], nonce, sizeof(nonce)))
+    return false;
+
+  unsigned char sig[SIG_BYTES];
+  if (!identitySign(&g_identity, nonce, sizeof(nonce), sig))
+    return false;
+
+  char sigHex[SIG_HEX_SIZE];
+  bytesToHex(sig, sizeof(sig), sigHex);
+  char frame[MSG_SIZE];
+  snprintf(frame, sizeof(frame), "AUTH|%s|%s\n", g_identity.token, sigHex);
+  if (!sendRawFrame(frame))
+    return false;
+
+  char ackBuf[MSG_SIZE];
+  n = tlsRecv(g_ssl, ackBuf, sizeof(ackBuf));
+  if (n <= 0)
+    return false;
+  partCount = protocolSplitFields(ackBuf, parts, PROTOCOL_MAX_PARTS);
+  return partCount >= 2 && strcmp(parts[0], "OK") == 0 &&
+         strcmp(parts[1], "AUTH") == 0;
 }
 
 int main(int argc, char *argv[]) {
-    logOpen();
-    clientLog("=== client_tui starting ===");
+  if (!platformInit()) {
+    fprintf(stderr, "Failed to initialize networking\n");
+    return 1;
+  }
 
-    initNcurses();
+  logOpen();
+  tcgetattr(STDIN_FILENO, &g_origTermios);
+  atexit(disableRawMode);
+  enableRawMode();
+  uiEnter();
 
-    if (!identityLoadOrCreate(&g_identity)) {
-        cleanupNcurses();
-        fprintf(stderr, "Fatal: could not load or create identity\n");
-        return 1;
-    }
-    char savedName[MAX_NAME_LEN];
-    if (identityLoadUsername(savedName, sizeof(savedName))) {
-        snprintf(g_username, sizeof(g_username), "%s", savedName);
+  if (!identityLoadOrCreate(&g_identity)) {
+    uiExit();
+    fprintf(stderr, "Fatal: could not load or create identity\n");
+    return 1;
+  }
+
+  if (!identityLoadUsername(g_username, sizeof(g_username)))
+    snprintf(g_username, sizeof(g_username), "%.8s", g_identity.token);
+  reloadDmHistoryIndex();
+
+  const char *ip = DEFAULT_IP;
+  int port = DEFAULT_PORT;
+  if (argc > 1) {
+    char *arg = argv[1];
+    char *colon = strchr(arg, ':');
+    if (colon) {
+      *colon = '\0';
+      ip = arg;
+      port = atoi(colon + 1);
     } else {
-        snprintf(g_username, sizeof(g_username), "%.8s", g_identity.token);
+      ip = arg;
     }
-    clientLog("identity loaded, token=%.16s...", g_identity.token);
+  }
 
-    const char *ip = DEFAULT_IP;
-    int port = DEFAULT_PORT;
-    if (argc > 1) {
-        char *arg = argv[1];
-        char *colon = strchr(arg, ':');
-        if (colon) {
-            *colon = '\0';
-            ip = arg;
-            port = atoi(colon + 1);
-        } else {
-            ip = arg;
-        }
-    }
+  if (!connectToServer(ip, port) || !authenticate()) {
+    uiExit();
+    fprintf(stderr, "Failed to connect/authenticate to %s:%d\n", ip, port);
+    return 1;
+  }
 
-    if (!connectToServer(ip, port)) {
-        cleanupNcurses();
-        fprintf(stderr, "Failed to connect to %s:%d\n", ip, port);
-        return 1;
-    }
+  char nameFrame[MSG_SIZE];
+  snprintf(nameFrame, sizeof(nameFrame), "SET_NAME|%s\n", g_username);
+  sendRawFrame(nameFrame);
+  sendRawFrame("ROOM_LIST\n");
+  addMessage(UI_MSG_INFO, "[*] Connected to server");
+  addMessage(UI_MSG_INFO, "[*] Type /help or press ? for commands");
 
-    if (!authenticate()) {
-        cleanupNcurses();
-        fprintf(stderr, "Authentication failed\n");
-        tlsFree(g_ssl);
-        close(g_socketFD);
-        return 1;
-    }
+  pthread_t recvTid;
+  if (pthread_create(&recvTid, NULL, receiveThread, NULL) != 0) {
+    uiExit();
+    fprintf(stderr, "Failed to create receive thread\n");
+    return 1;
+  }
 
-    pthread_t recvTid;
-    if (pthread_create(&recvTid, NULL, receiveThread, NULL) != 0) {
-        cleanupNcurses();
-        fprintf(stderr, "Failed to create receive thread\n");
-        tlsFree(g_ssl);
-        close(g_socketFD);
-        return 1;
-    }
+  eventLoop();
+  if (g_socketFD != INVALID_SOCKET_HANDLE)
+    platformShutdownSocket(g_socketFD);
+  pthread_join(recvTid, NULL);
 
-    addMessage("[*] Connected to server");
-    addMessage("[*] Use /enter <room> to join a room");
-    addMessage("[*] Use /help for commands");
-
-    sendToServer("/rooms\n");
-    g_dmCount = historyGetAll(g_dmList);
-    identityLoadDmNicks(g_dmNick);
-
-    char nameCmd[MSG_SIZE];
-    snprintf(nameCmd, sizeof(nameCmd), "/name %s\n", g_username);
-    sendToServer(nameCmd);
-
-    inputLoop();
-
-    pthread_join(recvTid, NULL);
-    clientLog("=== client_tui shutting down ===");
+  uiExit();
+  if (g_ssl)
     tlsFree(g_ssl);
-    close(g_socketFD);
-    pthread_mutex_destroy(&g_inputMutex);
-    cleanupNcurses();
-    clearMessages();
-    if (g_logFile) fclose(g_logFile);
-    return 0;
+  if (g_socketFD != INVALID_SOCKET_HANDLE)
+    platformCloseSocket(g_socketFD);
+  pthread_mutex_destroy(&g_stateMutex);
+  if (g_logFile)
+    fclose(g_logFile);
+  platformCleanup();
+  return 0;
 }

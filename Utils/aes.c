@@ -1,5 +1,7 @@
 #include "aes.h"
 
+#include <openssl/kdf.h>
+
 #define GCM_NONCE_LEN 12
 #define GCM_TAG_LEN 16
 #define GCM_OVERHEAD (GCM_NONCE_LEN + GCM_TAG_LEN)
@@ -138,4 +140,126 @@ int decodeBase64(const char *input, unsigned char *output) {
 
 bool isEncryptedMessage(const char *buffer) {
   return strncmp(buffer, "ENC:", 4) == 0;
+}
+
+void bytesToHex(const unsigned char *input, size_t length, char *output) {
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < length; i++) {
+    output[i * 2] = hex[input[i] >> 4];
+    output[i * 2 + 1] = hex[input[i] & 0x0f];
+  }
+  output[length * 2] = '\0';
+}
+
+bool hexToBytes(const char *input, unsigned char *output, size_t outputLen) {
+  if (!input || strlen(input) != outputLen * 2)
+    return false;
+
+  for (size_t i = 0; i < outputLen; i++) {
+    unsigned char hi;
+    unsigned char lo;
+    char hc = input[i * 2];
+    char lc = input[i * 2 + 1];
+
+    if (hc >= '0' && hc <= '9')
+      hi = (unsigned char)(hc - '0');
+    else if (hc >= 'a' && hc <= 'f')
+      hi = (unsigned char)(hc - 'a' + 10);
+    else if (hc >= 'A' && hc <= 'F')
+      hi = (unsigned char)(hc - 'A' + 10);
+    else
+      return false;
+
+    if (lc >= '0' && lc <= '9')
+      lo = (unsigned char)(lc - '0');
+    else if (lc >= 'a' && lc <= 'f')
+      lo = (unsigned char)(lc - 'a' + 10);
+    else if (lc >= 'A' && lc <= 'F')
+      lo = (unsigned char)(lc - 'A' + 10);
+    else
+      return false;
+
+    output[i] = (unsigned char)((hi << 4) | lo);
+  }
+
+  return true;
+}
+
+static bool deriveRoomMaterial(const char *password, const unsigned char *salt,
+                               size_t saltLen, const char *label,
+                               unsigned char output[32]) {
+  unsigned char derivedSalt[128];
+  int written = snprintf((char *)derivedSalt, sizeof(derivedSalt), "%s:", label);
+  if (written <= 0 || (size_t)written + saltLen > sizeof(derivedSalt))
+    return false;
+  memcpy(derivedSalt + written, salt, saltLen);
+
+  if (PKCS5_PBKDF2_HMAC(password, (int)strlen(password), derivedSalt,
+                        written + (int)saltLen, 120000, EVP_sha256(), 32,
+                        output) != 1) {
+    return false;
+  }
+  return true;
+}
+
+bool createRoomSecrets(const char *roomName, const char *password,
+                       char saltHex[ROOM_SALT_HEX_SIZE],
+                       char verifierHex[SHA256_HEX_SIZE],
+                       unsigned char keyOut[32]) {
+  unsigned char salt[ROOM_SALT_LEN];
+  if (!roomName || !password || !saltHex || !verifierHex || !keyOut)
+    return false;
+  if (RAND_bytes(salt, sizeof(salt)) != 1)
+    return false;
+
+  bytesToHex(salt, sizeof(salt), saltHex);
+
+  if (!deriveRoomMaterial(password, salt, sizeof(salt), "socketchat-room-proof",
+                          keyOut))
+    return false;
+
+  unsigned char verifierBytes[32];
+  if (!deriveRoomMaterial(password, salt, sizeof(salt),
+                          "socketchat-room-verifier", verifierBytes))
+    return false;
+  bytesToHex(verifierBytes, sizeof(verifierBytes), verifierHex);
+
+  if (roomName[0]) {
+    unsigned char roomMix[32];
+    sha256Bytes(roomName, strlen(roomName), roomMix);
+    for (int i = 0; i < 32; i++)
+      keyOut[i] ^= roomMix[i];
+  }
+
+  return true;
+}
+
+bool verifyRoomSecret(const char *roomName, const char *password,
+                      const char *saltHex,
+                      char verifierHex[SHA256_HEX_SIZE],
+                      unsigned char keyOut[32]) {
+  unsigned char salt[ROOM_SALT_LEN];
+  if (!roomName || !password || !saltHex || !verifierHex || !keyOut)
+    return false;
+  if (!hexToBytes(saltHex, salt, sizeof(salt)))
+    return false;
+
+  if (!deriveRoomMaterial(password, salt, sizeof(salt), "socketchat-room-proof",
+                          keyOut))
+    return false;
+
+  unsigned char verifierBytes[32];
+  if (!deriveRoomMaterial(password, salt, sizeof(salt),
+                          "socketchat-room-verifier", verifierBytes))
+    return false;
+  bytesToHex(verifierBytes, sizeof(verifierBytes), verifierHex);
+
+  if (roomName[0]) {
+    unsigned char roomMix[32];
+    sha256Bytes(roomName, strlen(roomName), roomMix);
+    for (int i = 0; i < 32; i++)
+      keyOut[i] ^= roomMix[i];
+  }
+
+  return true;
 }

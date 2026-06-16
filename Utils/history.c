@@ -3,31 +3,20 @@
 
 #define MAX_LINE 2048
 
-static const char *homeDir(void) {
-  const char *h = getenv("HOME");
-  if (h)
-    return h;
-  struct passwd *pw = getpwuid(getuid());
-  return pw ? pw->pw_dir : NULL;
-}
-
 static bool historyPath(const char *peerToken, char *out, size_t outSize) {
-  const char *home = homeDir();
-  if (!home)
+  char dir[512];
+  if (!platformGetConfigDir(dir, sizeof(dir)))
     return false;
-  snprintf(out, outSize, "%s/.socketchat/dm_%.64s.log", home, peerToken);
+  snprintf(out, outSize, "%s%cdm_%.64s.log", dir, SOCKETCHAT_PATH_SEP,
+           peerToken);
   return true;
 }
 
 static bool ensureDir(void) {
-  const char *home = homeDir();
-  if (!home)
-    return false;
   char dir[512];
-  snprintf(dir, sizeof(dir), "%s/.socketchat", home);
-  if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+  if (!platformGetConfigDir(dir, sizeof(dir)))
     return false;
-  return true;
+  return platformEnsureDir(dir);
 }
 
 static size_t escapeNewlines(const char *msg, char *buf, size_t bufSize) {
@@ -68,10 +57,10 @@ bool historyAppend(const char *peerToken, bool sent, const char *message) {
     return false;
 
   time_t now = time(NULL);
-  struct tm *tm_info = localtime(&now);
+  struct tm tmInfo;
   char ts[32] = "0000-00-00T00:00:00";
-  if (tm_info)
-    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", tm_info);
+  if (platformLocalTime(now, &tmInfo))
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmInfo);
 
   char escaped[MAX_LINE];
   escapeNewlines(message, escaped, sizeof(escaped));
@@ -118,7 +107,7 @@ void historyPrint(const char *peerToken, size_t count) {
       if (len > 0 && line[len - 1] == '\n')
         line[len - 1] = '\0';
       free(ring[idx % count]);
-      ring[idx % count] = strdup(line);
+      ring[idx % count] = platformStrDup(line);
       idx++;
       total++;
     }
@@ -150,14 +139,11 @@ bool historyExists(const char *peerToken) {
 }
 
 void historyListAll(void) {
-  const char *home = homeDir();
-  if (!home) {
-    printf("  (cannot read home directory)\n");
+  char dir[1024];
+  if (!platformGetConfigDir(dir, sizeof(dir))) {
+    printf("  (cannot read config directory)\n");
     return;
   }
-
-  char dir[1024];
-  snprintf(dir, sizeof(dir), "%s/.socketchat", home);
 
   DIR *d = opendir(dir);
   if (!d) {
@@ -189,8 +175,9 @@ void historyListAll(void) {
     struct stat st;
     char timeStr[32] = "unknown";
     if (stat(fullPath, &st) == 0) {
-      struct tm *tm = localtime(&st.st_mtime);
-      strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", tm);
+      struct tm tmInfo;
+      if (platformLocalTime(st.st_mtime, &tmInfo))
+        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", &tmInfo);
     }
     printf("  %s  (last active: %s)\n", token, timeStr);
     found++;
@@ -202,11 +189,9 @@ void historyListAll(void) {
 }
 
 int historyGetAll(char tokens[50][TOKEN_STR_SIZE]) {
-    const char *home = homeDir();
-    if (!home) return 0;
-
     char dir[1024];
-    snprintf(dir, sizeof(dir), "%s/.socketchat", home);
+    if (!platformGetConfigDir(dir, sizeof(dir)))
+        return 0;
 
     DIR *d = opendir(dir);
     if (!d) return 0;

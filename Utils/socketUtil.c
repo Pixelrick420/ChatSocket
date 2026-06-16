@@ -9,9 +9,9 @@ void print(const char *message) {
   pthread_mutex_unlock(&s_printLock);
 }
 
-int createTCPSocket(void) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
+SocketHandle createTCPSocket(void) {
+  SocketHandle fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd == INVALID_SOCKET_HANDLE)
     perror("socket");
   return fd;
 }
@@ -39,7 +39,7 @@ SocketAddress *createSocketAddress(const char *ipAddr, int port,
   return addr;
 }
 
-int connectSocket(int socketFD, SocketAddress *address) {
+int connectSocket(SocketHandle socketFD, SocketAddress *address) {
   if (connect(socketFD, (struct sockaddr *)address, sizeof(*address)) != 0) {
     perror("connect");
     return -1;
@@ -47,7 +47,7 @@ int connectSocket(int socketFD, SocketAddress *address) {
   return 0;
 }
 
-int bindSocket(int socketFD, SocketAddress *address) {
+int bindSocket(SocketHandle socketFD, SocketAddress *address) {
   if (bind(socketFD, (struct sockaddr *)address, sizeof(*address)) != 0) {
     perror("bind");
     exit(EXIT_FAILURE);
@@ -55,7 +55,7 @@ int bindSocket(int socketFD, SocketAddress *address) {
   return 0;
 }
 
-Client *acceptClient(int serverSocketFD) {
+Client *acceptClient(SocketHandle serverSocketFD) {
   Client *client = calloc(1, sizeof(Client));
   SocketAddress *clientAddr = calloc(1, sizeof(SocketAddress));
 
@@ -69,16 +69,17 @@ Client *acceptClient(int serverSocketFD) {
   client->socketFD =
       accept(serverSocketFD, (struct sockaddr *)clientAddr, &addrSize);
   client->address = clientAddr;
-  client->success = (client->socketFD > 0);
+  client->success = (client->socketFD != INVALID_SOCKET_HANDLE);
   client->currentRoom = -1;
-  client->error = client->success ? 0 : errno;
+  client->error = client->success ? 0 : platformSocketErrno();
 
   snprintf(client->name, MAX_NAME_LEN, "User%d", rand() % 10000);
 
   return client;
 }
 
-ServerContext *createServerContext(int socketFD, int maxClients, int maxRooms) {
+ServerContext *createServerContext(SocketHandle socketFD, int maxClients,
+                                   int maxRooms) {
   ServerContext *ctx = calloc(1, sizeof(ServerContext));
   if (!ctx) {
     perror("calloc");
@@ -128,7 +129,7 @@ bool addClient(ServerContext *context, Client *client) {
   return true;
 }
 
-void removeClient(ServerContext *context, int socketFD) {
+void removeClient(ServerContext *context, SocketHandle socketFD) {
   pthread_mutex_lock(&context->mutex);
 
   for (size_t i = 0; i < context->clientCount; i++) {
@@ -178,14 +179,14 @@ int findRoomIndex(ServerContext *context, const char *name) {
   return -1;
 }
 
-bool addMemberToRoom(Room *room, int socketFD) {
+bool addMemberToRoom(Room *room, SocketHandle socketFD) {
   if (room->memberCount >= room->maxMembers)
     return false;
   room->members[room->memberCount++] = socketFD;
   return true;
 }
 
-bool removeMemberFromRoom(Room *room, int socketFD) {
+bool removeMemberFromRoom(Room *room, SocketHandle socketFD) {
   for (int i = 0; i < room->memberCount; i++) {
     if (room->members[i] == socketFD) {
       room->members[i] = room->members[--room->memberCount];
@@ -202,7 +203,8 @@ void cleanupInactiveRooms(ServerContext *context) {
   pthread_mutex_lock(&context->mutex);
 
   for (int i = 0; i < context->roomCount; i++) {
-    if (difftime(now, context->rooms[i]->lastActivity) > ROOM_TIMEOUT) {
+    if (context->rooms[i]->memberCount == 0 &&
+        difftime(now, context->rooms[i]->lastActivity) > ROOM_TIMEOUT) {
       destroyRoom(context->rooms[i]);
       context->rooms[i] = context->rooms[--context->roomCount];
       i--;
@@ -212,9 +214,9 @@ void cleanupInactiveRooms(ServerContext *context) {
   pthread_mutex_unlock(&context->mutex);
 }
 
-void broadcastToRoom(ServerContext *context, int roomIdx, int senderFD,
+void broadcastToRoom(ServerContext *context, int roomIdx, SocketHandle senderFD,
                      const char *msg) {
-  int fds[MAX_ROOM_MEMBERS];
+  SocketHandle fds[MAX_ROOM_MEMBERS];
   int count = 0;
 
   pthread_mutex_lock(&context->mutex);

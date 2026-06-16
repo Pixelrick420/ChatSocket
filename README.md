@@ -1,277 +1,155 @@
 # ChatSocket
 
-A multi-room, end-to-end encrypted chat application written in C with both CLI and TUI clients. Designed for secure communication with AES-256-CTR encryption for rooms and X25519 key exchange for direct messages.
+ChatSocket is a multi-room chat application written in C for macOS and Linux. It ships with:
 
-## Features
+- a TLS server
+- a raw CLI client
+- a modern full-screen terminal UI client
 
-- **Multi-room Support**: Create and join separate chat rooms
-- **End-to-End Encryption**: AES-256-CTR with password-derived keys for room messages
-- **Password-Protected Rooms**: Salted and hashed room passwords using SHA-256
-- **Direct Messages**: Encrypted DMs between users using X25519 key exchange
-- **Ed25519 Identity**: Persistent Ed25519 key pairs for user authentication
-- **TUI Client**: Modern ncurses-based terminal UI with split panels
-- **CLI Client**: Original raw-mode terminal client with real-time input
-- **TLS Support**: Secure transport layer for all connections
-- **Persistence**: Username, identity tokens, and DM nicknames saved locally
+This version is a breaking protocol redesign focused on stronger end-to-end security, better portability across Unix-like systems, and cleaner local bootstrapping.
+
+## Highlights
+
+- Protected rooms are now truly end-to-end encrypted against the server.
+- Room access verification and room encryption keys are derived separately.
+- Direct messages use a signed ephemeral X25519 handshake and AES-256-GCM.
+- The old `ncurses` TUI has been replaced with a custom terminal renderer.
+- The `run.sh` scripts can bootstrap build dependencies on macOS and common Linux distros.
+- Clients pin the server certificate fingerprint on first successful connection.
+
+## Security Model
+
+### Protected rooms
+
+Protected rooms no longer send the room secret or a directly reusable room key derivative to the server.
+
+- The client generates a random salt.
+- The server stores only a salted verifier.
+- The room encryption key is derived locally from the room secret with a separate KDF context.
+- Room messages are encrypted client-side with AES-256-GCM.
+
+That means the server can decide whether a join proof is valid, but it cannot decrypt the room contents.
+
+### Direct messages
+
+DM sessions use:
+
+- Ed25519 identity keys for long-term identity
+- signed ephemeral X25519 key exchange for session setup
+- HKDF-SHA256 for session key derivation
+- AES-256-GCM for message encryption
+
+This is stronger than the previous static shared-secret DM flow because session keys are no longer just permanent derivatives of the long-lived identity material.
+
+### Transport
+
+The transport layer is still TLS, but clients now pin the server certificate fingerprint on first use.
+
+- First connection to `host:port`: the fingerprint is stored locally.
+- Later connections: the fingerprint must match.
+
+This is a trust-on-first-use model, not public CA validation.
+
+## TUI
+
+The new TUI is a custom full-screen terminal interface built directly on ANSI terminal control and raw input handling.
+
+- split conversation and sidebar layout
+- room list and DM list on the right
+- scrollback with arrow keys
+- in-app help with `?`
+- dark, modern terminal aesthetic instead of the old `ncurses` look
 
 ## Quick Start
-
-```bash
-# Terminal 1: Start server
-cd Server && ./run.sh
-
-# Terminal 2: Start TUI client
-cd Client && ./run_tui.sh
-
-# Or CLI client
-cd Client && ./run.sh
-```
-
-Connect to a remote server by passing the address:
-```bash
-cd Client && ./run_tui.sh 192.168.1.100:2077
-```
-
-## Clients
-
-### TUI Client (`client_tui`)
-
-Modern ncurses interface (~1450 lines) with:
-- Split panel layout: messages on left (main area), sidebar on right (40 cols)
-- Scrollable message history (Up/Down, j/k, PageUp/PageDown, g/G for Home/End)
-- Mouse-free navigation with keyboard shortcuts
-- Warm/muted color palette (muted cyan for messages, green border for lobby, cyan for rooms, magenta for DMs)
-- Scroll position indicator in top bar
-- Help overlay (press ? or F1)
-- Persistent username saved to `~/.socketchat/username`
-- Persistent DM nicknames saved to `~/.socketchat/dm_nicks`
-- Auto-connect to server on startup if address saved
-
-### CLI Client (`client`)
-
-Original raw-mode terminal client with:
-- Real-time character input without pressing Enter
-- Backspace support for editing
-- Color-coded output
-- Manual connection to any server address
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Display available commands |
-| `/name <username>` | Set display name (persisted locally) |
-| `/create <room>` | Create a public room |
-| `/create <room> -p <pass>` | Create an encrypted room |
-| `/enter <room>` | Join a room |
-| `/leave` | Leave current room or DM |
-| `/rooms` | List available rooms from server |
-| `/dm <1\|token>` | Start DM (use index, prefix, or full token) |
-| `/dmleave` | Leave current DM session |
-| `/list` | Refresh local DM history |
-| `/nick <n> <name>` | Rename a DM by index |
-| `/token` | Show your Ed25519 identity token |
-| `/clear` | Clear current message view |
-| `/exit` | Disconnect and quit |
-
-DM syntax supports multiple formats:
-- `/dm abcdef12` - use 8+ character token prefix
-- `/dm MyFriend` - use saved nickname
-- `/dm <1>` - use indexed reference
-
-## Architecture
-
-### Network
-
-- **Protocol**: TCP/IPv4 with optional TLS
-- **Default Port**: 2077
-- **Port override**: Set `PORT` environment variable
-- **Message Size**: 2048 bytes (configurable in code)
-
-### Cryptography
-
-#### Room Encryption (AES-256-CTR)
-- Algorithm: AES-256 in Counter Mode
-- Key Derivation: SHA-256 of room password
-- IV: 16-byte random per message
-- Format: `ENC:<base64-encoded-ciphertext>`
-
-#### Direct Messages (X25519)
-- Key Exchange: X25519 Diffie-Hellman
-- Identity Keys: Ed25519 key pairs
-- Token Format: 64-character hex string
-- Per-message encryption with unique nonces
-
-#### Password Storage
-- Hashing: SHA-256 with 10,000 iterations
-- Salt: 16-byte random per room
-- Format: `<salt_hex>:<hash_hex>`
-- Constant-time comparison for verification
-
-### Server Components
-
-- Thread-per-client model with detached threads
-- Mutex-protected shared state for rooms
-- Maximum 50 concurrent rooms
-- Maximum 32 members per room
-- Broadcast messaging within rooms
-- Room entry/exit notifications
-
-### Client State
-
-The TUI maintains several state files in `~/.socketchat/`:
-- `username` - Local username display
-- `identity` - Ed25519 private key
-- `dm_nicks` - Saved DM nicknames (JSON)
-- `server` - Last connected server address
-
-## Building
 
 ### Server
 
 ```bash
 cd Server
-gcc server.c ../Utils/socketUtil.c ../Utils/sha256.c -o server -lpthread
-./server
+./run.sh
 ```
 
-Or use the provided script:
-```bash
-cd Server && ./run.sh
-```
-
-### CLI Client
+### TUI client
 
 ```bash
 cd Client
-gcc client.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c -o client -lpthread -lssl -lcrypto
-./client [address:port]
+./run_tui.sh
 ```
 
-### TUI Client
+### CLI client
 
 ```bash
 cd Client
-gcc client_tui.c ../Utils/socketUtil.c ../Utils/sha256.c ../Utils/aes.c ../Utils/identity.c ../Utils/history.c -o client_tui -lpthread -lssl -lcrypto -lncurses
-./client_tui [address:port]
+./run.sh
 ```
 
-## Usage Examples
+To connect to another host:
 
-### Basic Room Chat
+```bash
+cd Client
+./run_tui.sh 192.168.1.100:2077
+```
 
-1. Start server:
-   ```bash
-   cd Server && ./run.sh
-   ```
+## Dependency Bootstrap
 
-2. Client A creates room:
-   ```
-   >>> /name Alice
-   >>> /create project-alpha
-   [*] Room 'project-alpha' created
-   ```
+The `run.sh` scripts now check for:
 
-3. Client B joins:
-   ```
-   >>> /name Bob
-   >>> /enter project-alpha
-   [*] Entered room 'project-alpha'
-   ```
+- `gcc`
+- `pkg-config`
+- OpenSSL development headers/libraries
 
-4. Chat:
-   ```
-   >>> Hello team!
-   << Alice: Hello team!
-   ```
+If anything is missing, the scripts try to install the required packages:
 
-### Encrypted Room
+- macOS: Homebrew
+- Linux: `apt`, `dnf`, `yum`, `pacman`, or `zypper`
 
-1. Create password-protected room:
-   ```
-   >>> /create secrets -p mysecretpassword
-   [*] Room 'secrets' created
-   ```
+If your system uses another package manager, install the dependencies manually and rerun the script.
 
-2. Others must enter with password:
-   ```
-   >>> /enter secrets
-   [*] Password: ********
-   [*] Entered room 'secrets'
-   ```
+## Commands
 
-### Direct Messages
+### Shared client commands
 
-1. Get your token:
-   ```
-   >>> /token
-   [*] Token: abc123... (share this with friend)
-   ```
+- `/name <name>`: set your local display name and sync it to the server
+- `/rooms`: refresh the server room list
+- `/create <room>`: create an open room
+- `/create <room> -p <secret>`: create a protected room
+- `/enter <room>`: enter a room
+- `/leave`: leave the current room
+- `/dm <token|nick|prefix>`: start a DM
+- `/dmleave`: close the active DM session
+- `/list`: load locally-known DM history
+- `/nick <token|nick|prefix> <name>`: save a local nickname for a DM peer
+- `/token`: show your identity token
+- `/help`: show help
+- `/exit`: disconnect
 
-2. Start DM using friend's token:
-   ```
-   >>> /dm abc123def456...
-   [*] DM established
-   ```
+## Build Notes
 
-3. Or view DM list and use index:
-   ```
-   >>> /list
-   >>> /dm 1
-   ```
+The scripts compile with `pkg-config`:
 
-4. Rename DM for easy reference:
-   ```
-   >>> /nick 1 John
-   ```
+```bash
+pkg-config --cflags --libs openssl
+```
 
-## Security Considerations
+If you want to compile manually, use the same OpenSSL flags plus `-lpthread`.
 
-### Strengths
+## Local State
 
-- End-to-end encryption - server cannot read message content
-- AES-256-CTR - industry-standard encryption
-- X25519 - modern elliptic curve key exchange
-- Ed25519 - secure identity authentication
-- Salted password hashing with high iteration count
-- Constant-time password comparison
-- Random IVs per message
-- Keys never transmitted over network
-- TLS option for transport security
+Client state is stored under `~/.socketchat/` by default.
 
-### Limitations
+- `identity.key`: persistent Ed25519 identity seed
+- `username`: saved display name
+- `dm_*.log`: DM history files
+- `dm_nicks.tsv`: token-to-nickname mappings
+- `server.crt` / `server.key`: server TLS material
+- `known_servers.tsv`: pinned TLS fingerprints by `host:port`
 
-- Shared room passwords - all members have same key
-- No message authentication (spoofing possible)
-- Server logs encrypted metadata
-- Username/room membership visible to server
-- No forward secrecy
+## Limitations
 
-## Troubleshooting
-
-### Connection Issues
-
-- Check server is running: `netstat -tlnp | grep 2077`
-- Verify firewall allows port 2077
-- Test local connection first: `telnet localhost 2077`
-
-### Build Errors
-
-- Install dependencies:
-  ```bash
-  # Debian/Ubuntu
-  sudo apt install build-essential libssl-dev libncurses-dev
-  
-  # macOS
-  brew install openssl ncurses
-  ```
-
-### Runtime Issues
-
-- Ensure `~/.socketchat/` directory exists for TUI
-- Check terminal supports 256 colors: `echo $TERM`
-- Try alternate TERM: `TERM=screen-256color ./client_tui`
+- This pass targets macOS and Linux. Windows support was intentionally deferred.
+- The room protection model is still password-based, so weak shared secrets remain guessable offline if the verifier is stolen.
+- The TUI is intentionally lightweight and terminal-native; it is not using an external widget toolkit.
 
 ## License
 
-MIT - use as you wish.
+MIT

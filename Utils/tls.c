@@ -1,3 +1,4 @@
+#include "aes.h"
 #include "tls.h"
 
 static void tlsPrintErrors(const char *context) {
@@ -10,17 +11,9 @@ static const char *socketchatDir(void) {
   if (dir[0])
     return dir;
 
-  const char *home = getenv("HOME");
-  if (!home) {
-    struct passwd *pw = getpwuid(getuid());
-    if (pw)
-      home = pw->pw_dir;
-  }
-  if (!home)
+  if (!platformGetConfigDir(dir, sizeof(dir)))
     return NULL;
-
-  snprintf(dir, sizeof(dir), "%s/.socketchat", home);
-  if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+  if (!platformEnsureDir(dir))
     return NULL;
   return dir;
 }
@@ -40,6 +33,32 @@ static bool certPaths(char *certOut, size_t certSize, char *keyOut,
   if (n < 0 || (size_t)n >= keySize)
     return false;
 
+  return true;
+}
+
+static bool fingerprintPath(char *pathOut, size_t pathSize) {
+  const char *dir = socketchatDir();
+  if (!dir)
+    return false;
+  int n = snprintf(pathOut, pathSize, "%s%cknown_servers.tsv", dir,
+                   SOCKETCHAT_PATH_SEP);
+  return n >= 0 && (size_t)n < pathSize;
+}
+
+static bool tlsPeerFingerprint(SSL *ssl, char hexOut[SHA256_HEX_SIZE]) {
+  X509 *cert = SSL_get1_peer_certificate(ssl);
+  if (!cert)
+    return false;
+
+  unsigned char digest[SHA256_BYTES_SIZE];
+  unsigned int digestLen = 0;
+  bool ok = X509_digest(cert, EVP_sha256(), digest, &digestLen) == 1 &&
+            digestLen == SHA256_BYTES_SIZE;
+  X509_free(cert);
+  if (!ok)
+    return false;
+
+  bytesToHex(digest, digestLen, hexOut);
   return true;
 }
 
@@ -99,7 +118,7 @@ static bool generateSelfSignedCert(const char *certPath, const char *keyPath) {
     f = fdopen(fd, "w");
     if (!f) {
       perror("tls: fdopen server.key");
-      close(fd);
+      platformCloseFd(fd);
       goto out;
     }
     if (!PEM_write_PrivateKey(f, pkey, NULL, NULL, 0, NULL, NULL)) {
@@ -182,14 +201,14 @@ SSL_CTX *tlsServerCtxCreate(void) {
   return ctx;
 }
 
-SSL *tlsServerAccept(SSL_CTX *ctx, int fd) {
+SSL *tlsServerAccept(SSL_CTX *ctx, SocketHandle fd) {
   SSL *ssl = SSL_new(ctx);
   if (!ssl) {
     tlsPrintErrors("SSL_new (server)");
     return NULL;
   }
 
-  SSL_set_fd(ssl, fd);
+  SSL_set_fd(ssl, (int)fd);
 
   if (SSL_accept(ssl) != 1) {
     tlsPrintErrors("SSL_accept");
@@ -214,14 +233,14 @@ SSL_CTX *tlsClientCtxCreate(void) {
   return ctx;
 }
 
-SSL *tlsClientConnect(SSL_CTX *ctx, int fd) {
+SSL *tlsClientConnect(SSL_CTX *ctx, SocketHandle fd) {
   SSL *ssl = SSL_new(ctx);
   if (!ssl) {
     tlsPrintErrors("SSL_new (client)");
     return NULL;
   }
 
-  SSL_set_fd(ssl, fd);
+  SSL_set_fd(ssl, (int)fd);
 
   if (SSL_connect(ssl) != 1) {
     tlsPrintErrors("SSL_connect");
@@ -229,6 +248,45 @@ SSL *tlsClientConnect(SSL_CTX *ctx, int fd) {
     return NULL;
   }
   return ssl;
+}
+
+bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
+  if (!ssl || !serverLabel || !serverLabel[0])
+    return false;
+
+  char fingerprint[SHA256_HEX_SIZE];
+  if (!tlsPeerFingerprint(ssl, fingerprint))
+    return false;
+
+  char path[512];
+  if (!fingerprintPath(path, sizeof(path)))
+    return false;
+
+  FILE *f = fopen(path, "r");
+  if (f) {
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+      size_t len = strlen(line);
+      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+      char *tab = strchr(line, '\t');
+      if (!tab)
+        continue;
+      *tab++ = '\0';
+      if (strcmp(line, serverLabel) == 0) {
+        fclose(f);
+        return strcmp(tab, fingerprint) == 0;
+      }
+    }
+    fclose(f);
+  }
+
+  f = fopen(path, "a");
+  if (!f)
+    return false;
+  fprintf(f, "%s\t%s\n", serverLabel, fingerprint);
+  fclose(f);
+  return true;
 }
 
 bool tlsSend(SSL *ssl, const void *buf, size_t len) {
@@ -247,20 +305,31 @@ bool tlsSend(SSL *ssl, const void *buf, size_t len) {
 ssize_t tlsRecv(SSL *ssl, char *buf, size_t maxLen) {
   if (maxLen == 0)
     return -1;
-  int n = SSL_read(ssl, buf, (int)(maxLen - 1));
-  if (n > 0) {
-    buf[n] = '\0';
-    return (ssize_t)n;
+
+  size_t offset = 0;
+  while (offset < maxLen - 1) {
+    char ch;
+    int n = SSL_read(ssl, &ch, 1);
+    if (n > 0) {
+      buf[offset++] = ch;
+      if (ch == '\n')
+        break;
+      continue;
+    }
+
+    int err = SSL_get_error(ssl, n);
+    if (err == SSL_ERROR_ZERO_RETURN)
+      break;
+    if (err == SSL_ERROR_SYSCALL && errno == 0)
+      break;
+    if (err == SSL_ERROR_SSL)
+      break;
+    tlsPrintErrors("SSL_read");
+    return -1;
   }
-  int err = SSL_get_error(ssl, n);
-  if (err == SSL_ERROR_ZERO_RETURN)
-    return 0;
-  if (err == SSL_ERROR_SYSCALL && errno == 0)
-    return 0;
-  if (err == SSL_ERROR_SSL)
-    return 0;
-  tlsPrintErrors("SSL_read");
-  return -1;
+
+  buf[offset] = '\0';
+  return offset == 0 ? 0 : (ssize_t)offset;
 }
 
 void tlsFree(SSL *ssl) {

@@ -1,23 +1,30 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")"
+. ../bootstrap.sh
+
+ensure_build_prereqs
 
 PORT=${PORT:-2077}
 
 echo "Compiling server..."
-gcc server.c \
+"$BUILD_CC" server.c \
     ../Utils/socketUtil.c \
     ../Utils/sha256.c \
     ../Utils/identity.c \
     ../Utils/tls.c \
+    ../Utils/platform.c \
+    ../Utils/protocol.c \
+    ../Utils/aes.c \
     -o server \
-    -lpthread -lssl -lcrypto \
+    $(pkg-config --cflags --libs openssl) \
+    -lpthread \
     -Wall -Wextra -O2
 
 echo "Compiled successfully."
 
-if [ "$1" == "ngrok" ]; then
+if [ "${1:-}" = "ngrok" ]; then
     NGROK_PORT=${2:-$PORT}
 
     if ! command -v ngrok &>/dev/null; then

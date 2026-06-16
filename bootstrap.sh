@@ -1,0 +1,100 @@
+#!/bin/bash
+set -euo pipefail
+
+BOOTSTRAP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BOOTSTRAP_STAMP="$BOOTSTRAP_DIR/.bootstrap.$(uname -s | tr '[:upper:]' '[:lower:]').stamp"
+
+compiler_available() {
+  if [ -n "${CC:-}" ]; then
+    command -v "$CC" >/dev/null 2>&1
+    return
+  fi
+
+  command -v cc >/dev/null 2>&1 ||
+    command -v gcc >/dev/null 2>&1 ||
+    command -v clang >/dev/null 2>&1
+}
+
+select_compiler() {
+  local candidate
+
+  if [ -n "${CC:-}" ] && command -v "$CC" >/dev/null 2>&1; then
+    BUILD_CC="$CC"
+    export BUILD_CC
+    return 0
+  fi
+
+  for candidate in cc gcc clang; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      BUILD_CC="$candidate"
+      export BUILD_CC
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+need_install() {
+  ! compiler_available ||
+    ! command -v pkg-config >/dev/null 2>&1 ||
+    ! pkg-config --exists openssl
+}
+
+install_linux_deps() {
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y build-essential pkg-config libssl-dev
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y gcc make pkgconf-pkg-config openssl-devel
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y gcc make pkgconfig openssl-devel
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -Sy --noconfirm base-devel pkgconf openssl
+  elif command -v zypper >/dev/null 2>&1; then
+    sudo zypper install -y gcc make pkg-config libopenssl-devel
+  else
+    echo "Unsupported Linux package manager. Install gcc, pkg-config, and OpenSSL headers manually." >&2
+    exit 1
+  fi
+}
+
+install_macos_deps() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Homebrew is required on macOS to install build dependencies." >&2
+    echo "Install Homebrew from https://brew.sh and rerun this script." >&2
+    exit 1
+  fi
+  brew install gcc pkg-config openssl@3
+}
+
+ensure_build_prereqs() {
+  if [[ -f "$BOOTSTRAP_STAMP" ]] && ! need_install; then
+    select_compiler
+    return
+  fi
+
+  echo "Checking build dependencies..."
+  if need_install; then
+    case "$(uname -s)" in
+      Darwin)
+        install_macos_deps
+        ;;
+      Linux)
+        install_linux_deps
+        ;;
+      *)
+        echo "Unsupported OS for automatic dependency installation." >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  if need_install; then
+    echo "Dependencies are still missing after the install attempt." >&2
+    exit 1
+  fi
+
+  select_compiler
+  touch "$BOOTSTRAP_STAMP"
+}

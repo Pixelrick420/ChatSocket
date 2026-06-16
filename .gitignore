@@ -3,3 +3,6 @@ Client/client
 Server/server
 Client/test*
 Client/client_tui
+.bootstrap.*.stamp
+work/
+*.o
