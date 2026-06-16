@@ -188,33 +188,91 @@ void historyListAll(void) {
     printf("  (no DM history found)\n");
 }
 
-int historyGetAll(char tokens[50][TOKEN_STR_SIZE]) {
-    char dir[1024];
-    if (!platformGetConfigDir(dir, sizeof(dir)))
-        return 0;
+static int compareHistoryEntries(const void *lhs, const void *rhs) {
+  const HistoryDmEntry *a = (const HistoryDmEntry *)lhs;
+  const HistoryDmEntry *b = (const HistoryDmEntry *)rhs;
 
-    DIR *d = opendir(dir);
-    if (!d) return 0;
+  if (a->lastActive < b->lastActive)
+    return 1;
+  if (a->lastActive > b->lastActive)
+    return -1;
+  return strcmp(a->token, b->token);
+}
 
-    int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL && count < 50) {
+size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
+  if (!entries || maxEntries == 0)
+    return 0;
 
-        if (strncmp(entry->d_name, "dm_", 3) != 0)
-            continue;
-        size_t len = strlen(entry->d_name);
-        if (len < 8)
-            continue;
-        if (strcmp(entry->d_name + len - 4, ".log") != 0)
-            continue;
+  char dir[1024];
+  if (!platformGetConfigDir(dir, sizeof(dir)))
+    return 0;
 
-        size_t tokenLen = len - 3 - 4;
-        if (tokenLen > TOKEN_STR_SIZE)
-            tokenLen = TOKEN_STR_SIZE;
-        memcpy(tokens[count], entry->d_name + 3, tokenLen);
-        tokens[count][tokenLen] = '\0';
-        count++;
-    }
+  DIR *d = opendir(dir);
+  if (!d)
+    return 0;
+
+  size_t capacity = 16;
+  size_t count = 0;
+  HistoryDmEntry *allEntries = calloc(capacity, sizeof(HistoryDmEntry));
+  if (!allEntries) {
     closedir(d);
-    return count;
+    return 0;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(d)) != NULL) {
+    if (strncmp(entry->d_name, "dm_", 3) != 0)
+      continue;
+
+    size_t len = strlen(entry->d_name);
+    if (len < 8 || strcmp(entry->d_name + len - 4, ".log") != 0)
+      continue;
+
+    if (count == capacity) {
+      size_t newCapacity = capacity * 2;
+      HistoryDmEntry *grown =
+          realloc(allEntries, newCapacity * sizeof(HistoryDmEntry));
+      if (!grown)
+        break;
+      allEntries = grown;
+      capacity = newCapacity;
+    }
+
+    size_t tokenLen = len - 3 - 4;
+    if (tokenLen >= TOKEN_STR_SIZE)
+      tokenLen = TOKEN_STR_SIZE - 1;
+    memcpy(allEntries[count].token, entry->d_name + 3, tokenLen);
+    allEntries[count].token[tokenLen] = '\0';
+
+    char fullPath[1024 + NAME_MAX + 2];
+    snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, entry->d_name);
+    struct stat st;
+    allEntries[count].lastActive =
+        (stat(fullPath, &st) == 0) ? st.st_mtime : 0;
+    count++;
+  }
+  closedir(d);
+
+  qsort(allEntries, count, sizeof(HistoryDmEntry), compareHistoryEntries);
+
+  size_t copied = count < maxEntries ? count : maxEntries;
+  for (size_t i = 0; i < copied; i++)
+    entries[i] = allEntries[i];
+  free(allEntries);
+  return copied;
+}
+
+int historyGetAll(char tokens[][TOKEN_STR_SIZE], size_t maxTokens) {
+  if (!tokens || maxTokens == 0)
+    return 0;
+
+  HistoryDmEntry *entries = calloc(maxTokens, sizeof(HistoryDmEntry));
+  if (!entries)
+    return 0;
+
+  size_t count = historyLoadEntries(entries, maxTokens);
+  for (size_t i = 0; i < count; i++)
+    snprintf(tokens[i], TOKEN_STR_SIZE, "%s", entries[i].token);
+  free(entries);
+  return (int)count;
 }

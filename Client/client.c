@@ -1,4 +1,5 @@
 #include "../Utils/aes.h"
+#include "../Utils/contacts.h"
 #include "../Utils/ecdh.h"
 #include "../Utils/history.h"
 #include "../Utils/identity.h"
@@ -6,6 +7,7 @@
 #include "../Utils/socketUtil.h"
 #include "../Utils/tls.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <termios.h>
 
@@ -66,11 +68,11 @@ static InputState g_input = {
     .roomSecretLen = 0,
 };
 
-static char g_dmList[MAX_DM_NICKS][TOKEN_STR_SIZE] = {{0}};
-static char g_dmNick[MAX_DM_NICKS][MAX_NAME_LEN] = {{0}};
-static int g_dmCount = 0;
+static ContactBook g_contacts = {0};
 
 static void clientLog(const char *fmt, ...) PRINTF_FMT(1, 2);
+static void printMessage(const char *color, const char *prefix,
+                         const char *message);
 
 static void logOpen(void) {
   char configDir[512];
@@ -131,74 +133,157 @@ static void clearDmSession(void) {
   memset(&g_dm, 0, sizeof(g_dm));
 }
 
-static void reloadDmNicknames(void) {
-  memset(g_dmNick, 0, sizeof(g_dmNick));
-
-  DmNickEntry entries[MAX_DM_NICKS];
-  size_t count = identityLoadDmNickEntries(entries, MAX_DM_NICKS);
-  for (size_t i = 0; i < count; i++) {
-    for (int j = 0; j < g_dmCount; j++) {
-      if (strcmp(g_dmList[j], entries[i].token) == 0) {
-        snprintf(g_dmNick[j], sizeof(g_dmNick[j]), "%s", entries[i].nick);
-        break;
-      }
-    }
-  }
-}
-
 static void reloadDmHistoryIndex(void) {
-  g_dmCount = historyGetAll(g_dmList);
-  reloadDmNicknames();
+  contactsLoad(&g_contacts);
+  if (g_dm.peerToken[0])
+    contactsRememberToken(&g_contacts, g_dm.peerToken);
 }
 
 static void saveDmNicknames(void) {
-  DmNickEntry entries[MAX_DM_NICKS];
-  size_t count = 0;
-  for (int i = 0; i < g_dmCount && count < MAX_DM_NICKS; i++) {
-    if (!g_dmList[i][0] || !g_dmNick[i][0])
-      continue;
-    snprintf(entries[count].token, sizeof(entries[count].token), "%s", g_dmList[i]);
-    snprintf(entries[count].nick, sizeof(entries[count].nick), "%s", g_dmNick[i]);
-    count++;
-  }
-  identitySaveDmNickEntries(entries, count);
+  contactsSaveNicknames(&g_contacts);
 }
 
 static void rememberDmToken(const char *token) {
-  for (int i = 0; i < g_dmCount; i++) {
-    if (strcmp(g_dmList[i], token) == 0)
-      return;
+  contactsRememberToken(&g_contacts, token);
+}
+
+static void formatDmLabel(const char *token, char *out, size_t outSize) {
+  contactsFormatLabel(&g_contacts, token, out, outSize);
+}
+
+static int dmContactCount(void) {
+  return (int)g_contacts.count;
+}
+
+static bool isTokenHex(const char *text) {
+  if (!text || strlen(text) != TOKEN_HEX_LEN)
+    return false;
+  for (size_t i = 0; text[i]; i++) {
+    if (!isxdigit((unsigned char)text[i]))
+      return false;
+  }
+  return true;
+}
+
+static const char *skipSpaces(const char *text) {
+  while (text && *text == ' ')
+    text++;
+  return text;
+}
+
+static void copyTrimmed(const char *input, char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  out[0] = '\0';
+  if (!input)
+    return;
+
+  input = skipSpaces(input);
+  size_t len = strlen(input);
+  while (len > 0 && input[len - 1] == ' ')
+    len--;
+  if (len >= outSize)
+    len = outSize - 1;
+  memcpy(out, input, len);
+  out[len] = '\0';
+}
+
+static bool splitFirstArgument(const char *input, char *first,
+                               size_t firstSize, const char **restOut) {
+  if (!first || firstSize == 0)
+    return false;
+
+  first[0] = '\0';
+  if (restOut)
+    *restOut = NULL;
+
+  input = skipSpaces(input);
+  if (!input || !input[0])
+    return false;
+
+  size_t rawLen = 0;
+  while (input[rawLen] && input[rawLen] != ' ')
+    rawLen++;
+
+  size_t copyLen = rawLen;
+  if (copyLen >= firstSize)
+    copyLen = firstSize - 1;
+  memcpy(first, input, copyLen);
+  first[copyLen] = '\0';
+
+  if (restOut)
+    *restOut = skipSpaces(input + rawLen);
+  return true;
+}
+
+static void printContactMatches(const char *query, const ContactMatch *matches,
+                                size_t matchCount) {
+  if (matchCount == 0) {
+    printf(COLOR_RED "[!] No contact matches \"%s\"\n" COLOR_RESET, query);
+    return;
   }
 
-  if (g_dmCount < MAX_DM_NICKS) {
-    snprintf(g_dmList[g_dmCount], sizeof(g_dmList[g_dmCount]), "%s", token);
-    g_dmCount++;
+  printf(COLOR_YELLOW "[*] Contacts matching \"%s\":\n" COLOR_RESET, query);
+  for (size_t i = 0; i < matchCount; i++) {
+    char reference[128];
+    contactsFormatReference(&g_contacts, matches[i].index, reference,
+                            sizeof(reference));
+    printf("  %zu. %s\n", matches[i].index + 1, reference);
   }
 }
 
-static int findDmByReference(const char *input) {
-  if (!input || !input[0])
-    return -1;
+static bool resolveDmReference(const char *input, char *tokenOut,
+                               size_t tokenOutSize, bool allowDirectToken,
+                               bool announceAmbiguity) {
+  if (!tokenOut || tokenOutSize == 0)
+    return false;
 
-  for (int i = 0; i < g_dmCount; i++) {
-    if (g_dmNick[i][0] && strcmp(g_dmNick[i], input) == 0)
-      return i;
+  char query[128];
+  copyTrimmed(input, query, sizeof(query));
+  if (!query[0]) {
+    if (announceAmbiguity)
+      printMessage(COLOR_RED, "[!] ", "Contact reference is empty\n");
+    return false;
   }
 
-  for (int i = 0; i < g_dmCount; i++) {
-    if (strncmp(g_dmList[i], input, strlen(input)) == 0)
-      return i;
+  ContactMatch matches[8];
+  size_t matchCount = 0;
+  ContactLookupStatus status =
+      contactsLookup(&g_contacts, query, matches, 8, &matchCount);
+  if (status == CONTACT_LOOKUP_UNIQUE && matchCount > 0) {
+    const DmContact *contact = contactsGet(&g_contacts, matches[0].index);
+    if (!contact)
+      return false;
+    snprintf(tokenOut, tokenOutSize, "%s", contact->token);
+    return true;
   }
 
-  return -1;
+  if (status == CONTACT_LOOKUP_AMBIGUOUS) {
+    if (announceAmbiguity) {
+      printMessage(COLOR_RED, "[!] ",
+                   "Multiple contacts match that query. Use /search or a number.\n");
+      printContactMatches(query, matches, matchCount);
+    }
+    return false;
+  }
+
+  if (allowDirectToken && isTokenHex(query)) {
+    snprintf(tokenOut, tokenOutSize, "%s", query);
+    return true;
+  }
+
+  if (announceAmbiguity)
+    printf(COLOR_RED "[!] No contact matches \"%s\"\n" COLOR_RESET, query);
+  return false;
 }
 
 static void printPrompt(void) {
   pthread_mutex_lock(&g_input.mutex);
   if (g_dm.active) {
-    char shortToken[17];
-    snprintf(shortToken, sizeof(shortToken), "%.16s", g_dm.peerToken);
-    printf(COLOR_GREEN "[DM:%.8s...]> " COLOR_RESET "%s", shortToken,
+    char dmLabel[64];
+    formatDmLabel(g_dm.peerToken, dmLabel, sizeof(dmLabel));
+    printf(COLOR_GREEN "[DM:%.18s]> " COLOR_RESET "%s", dmLabel,
            g_input.buffer);
   } else if (g_room.active) {
     printf(COLOR_GREEN "[#%.14s]> " COLOR_RESET "%s", g_room.currentName,
@@ -339,7 +424,10 @@ static void showRoomMessage(const char *sender, const char *payload) {
 
 static void showDmMessage(const char *senderToken, const char *payload) {
   if (!g_dm.active || strcmp(g_dm.peerToken, senderToken) != 0) {
-    printMessage(COLOR_YELLOW, "[*] ", "Received DM for an inactive session\n");
+    char dmLabel[64];
+    formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+    printf(COLOR_YELLOW "[*] Received DM for inactive contact %s\n" COLOR_RESET,
+           dmLabel);
     return;
   }
 
@@ -360,7 +448,9 @@ static void showDmMessage(const char *senderToken, const char *payload) {
   decrypted[plen] = '\0';
   historyAppend(senderToken, false, (char *)decrypted);
   rememberDmToken(senderToken);
-  printTimestamped(senderToken, (char *)decrypted, COLOR_CYAN);
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  printTimestamped(dmLabel, (char *)decrypted, COLOR_CYAN);
 }
 
 static void finalizeRoomSecretEntry(void) {
@@ -444,7 +534,10 @@ static void handleDmInit(const char *senderToken, const char *peerPubHex,
   rememberDmToken(senderToken);
 
   memset(myPriv, 0, sizeof(myPriv));
-  printMessage(COLOR_YELLOW, "[*] ", "DM session established\n");
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  printf(COLOR_YELLOW "[*] DM session established with %s\n" COLOR_RESET,
+         dmLabel);
 }
 
 static void handleDmAck(const char *senderToken, const char *peerPubHex,
@@ -477,7 +570,9 @@ static void handleDmAck(const char *senderToken, const char *peerPubHex,
   memset(g_dm.pendingPriv, 0, sizeof(g_dm.pendingPriv));
   memset(g_dm.pendingPub, 0, sizeof(g_dm.pendingPub));
   rememberDmToken(senderToken);
-  printMessage(COLOR_YELLOW, "[*] ", "DM session ready\n");
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  printf(COLOR_YELLOW "[*] DM session ready with %s\n" COLOR_RESET, dmLabel);
 }
 
 static void displayIncomingMessage(char *buffer) {
@@ -597,55 +692,65 @@ static void handleTokenCommand(void) {
 
 static void handleListCommand(void) {
   reloadDmHistoryIndex();
-  print(COLOR_YELLOW "[*] DM conversations:\n" COLOR_RESET);
-  for (int i = 0; i < g_dmCount; i++) {
-    char line[MSG_SIZE];
-    if (g_dmNick[i][0])
-      snprintf(line, sizeof(line), "  %d. %s (%s)\n", i + 1, g_dmNick[i],
-               g_dmList[i]);
-    else
-      snprintf(line, sizeof(line), "  %d. %s\n", i + 1, g_dmList[i]);
-    print(line);
+  print(COLOR_YELLOW "[*] Direct contacts:\n" COLOR_RESET);
+  for (int i = 0; i < dmContactCount(); i++) {
+    char reference[128];
+    contactsFormatReference(&g_contacts, (size_t)i, reference,
+                            sizeof(reference));
+    printf("  %d. %s\n", i + 1, reference);
   }
-  if (g_dmCount == 0)
-    print("  (no DM history)\n");
+  if (dmContactCount() == 0)
+    print("  (no DM contacts)\n");
 }
 
 static void handleNickCommand(const char *target, const char *nick) {
   reloadDmHistoryIndex();
-  int idx = findDmByReference(target);
-  if (idx < 0) {
-    printMessage(COLOR_RED, "[!] ", "DM not found\n");
+
+  char token[TOKEN_STR_SIZE] = {0};
+  if (!target || !target[0] || strcmp(target, "@") == 0) {
+    if (!g_dm.active) {
+      printMessage(COLOR_RED, "[!] ",
+                   "Start a DM first or pass a contact reference\n");
+      return;
+    }
+    snprintf(token, sizeof(token), "%s", g_dm.peerToken);
+  } else if (!resolveDmReference(target, token, sizeof(token), true, true)) {
     return;
   }
 
-  for (size_t i = 0; nick[i]; i++) {
-    unsigned char ch = (unsigned char)nick[i];
-    if (!(isalnum(ch) || ch == '-' || ch == '_')) {
-      printMessage(COLOR_RED, "[!] ", "Nicknames may use letters, digits, - and _\n");
+  if (strcmp(nick, "-") == 0) {
+    if (!contactsClearNickname(&g_contacts, token)) {
+      printMessage(COLOR_RED, "[!] ", "No nickname is set for that contact\n");
       return;
     }
+    saveDmNicknames();
+    printMessage(COLOR_YELLOW, "[*] ", "Nickname cleared\n");
+    return;
   }
 
-  snprintf(g_dmNick[idx], sizeof(g_dmNick[idx]), "%s", nick);
+  char error[128];
+  if (!contactsSetNickname(&g_contacts, token, nick, error, sizeof(error))) {
+    printf(COLOR_RED "[!] %s\n" COLOR_RESET, error);
+    return;
+  }
   saveDmNicknames();
   printMessage(COLOR_YELLOW, "[*] ", "Nickname saved\n");
+}
+
+static void handleSearchCommand(const char *query) {
+  reloadDmHistoryIndex();
+
+  ContactMatch matches[8];
+  size_t matchCount = contactsSearch(&g_contacts, query, matches, 8);
+  printContactMatches(query, matches, matchCount);
 }
 
 static void handleDmCommand(const char *input) {
   reloadDmHistoryIndex();
 
   char token[TOKEN_STR_SIZE] = {0};
-  if (strlen(input) == TOKEN_HEX_LEN) {
-    snprintf(token, sizeof(token), "%s", input);
-  } else {
-    int idx = findDmByReference(input);
-    if (idx < 0) {
-      printMessage(COLOR_RED, "[!] ", "Unknown DM reference\n");
-      return;
-    }
-    snprintf(token, sizeof(token), "%s", g_dmList[idx]);
-  }
+  if (!resolveDmReference(input, token, sizeof(token), true, true))
+    return;
 
   unsigned char myPub[32];
   unsigned char myPriv[32];
@@ -681,7 +786,9 @@ static void handleDmCommand(const char *input) {
   memcpy(g_dm.pendingPub, myPub, sizeof(g_dm.pendingPub));
   memset(myPriv, 0, sizeof(myPriv));
   rememberDmToken(token);
-  printMessage(COLOR_YELLOW, "[*] ", "DM request sent\n");
+  char dmLabel[64];
+  formatDmLabel(token, dmLabel, sizeof(dmLabel));
+  printf(COLOR_YELLOW "[*] DM request sent to %s\n" COLOR_RESET, dmLabel);
 }
 
 static bool processInput(char *message) {
@@ -700,10 +807,12 @@ static bool processInput(char *message) {
         "/create <room> -p <secret>\n"
         "/enter <room>\n"
         "/leave\n"
-        "/dm <token|nick|prefix>\n"
+        "/dm <contact>\n"
         "/dmleave\n"
         "/list\n"
-        "/nick <token|nick|prefix> <name>\n"
+        "/search <query>\n"
+        "/nick [@|contact] <name>\n"
+        "/nick <contact> -\n"
         "/token\n"
         "/clear\n"
         "/exit\n");
@@ -781,6 +890,16 @@ static bool processInput(char *message) {
     handleListCommand();
     return true;
   }
+  if (strncmp(message, "/search ", 8) == 0) {
+    char query[128];
+    copyTrimmed(message + 8, query, sizeof(query));
+    if (!query[0]) {
+      printMessage(COLOR_RED, "[!] ", "Usage: /search <query>\n");
+      return true;
+    }
+    handleSearchCommand(query);
+    return true;
+  }
   if (strcmp(message, "/dmleave") == 0) {
     clearDmSession();
     printMessage(COLOR_YELLOW, "[*] ", "DM session closed\n");
@@ -788,21 +907,64 @@ static bool processInput(char *message) {
   }
   if (strncmp(message, "/dm ", 4) == 0) {
     char target[128];
-    if (sscanf(message + 4, "%127s", target) != 1) {
-      printMessage(COLOR_RED, "[!] ", "Usage: /dm <token|nick|prefix>\n");
+    copyTrimmed(message + 4, target, sizeof(target));
+    if (!target[0]) {
+      printMessage(COLOR_RED, "[!] ", "Usage: /dm <contact>\n");
       return true;
     }
     handleDmCommand(target);
     return true;
   }
   if (strncmp(message, "/nick ", 6) == 0) {
-    char target[128];
-    char nick[MAX_NAME_LEN];
-    if (sscanf(message + 6, "%127s %63s", target, nick) != 2) {
-      printMessage(COLOR_RED, "[!] ", "Usage: /nick <token|nick|prefix> <name>\n");
+    const char *args = skipSpaces(message + 6);
+    char first[128];
+    const char *rest = NULL;
+    if (!splitFirstArgument(args, first, sizeof(first), &rest) || !first[0]) {
+      printMessage(COLOR_RED, "[!] ", "Usage: /nick [@|contact] <name>\n");
       return true;
     }
-    handleNickCommand(target, nick);
+
+    if (strcmp(first, "@") == 0) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(rest, nick, sizeof(nick));
+      if (!nick[0]) {
+        printMessage(COLOR_RED, "[!] ", "Usage: /nick @ <name>\n");
+        return true;
+      }
+      handleNickCommand("@", nick);
+      return true;
+    }
+
+    if (rest && rest[0]) {
+      char probeToken[TOKEN_STR_SIZE];
+      if (!g_dm.active ||
+          resolveDmReference(first, probeToken, sizeof(probeToken), true, false)) {
+        char nick[MAX_NAME_LEN];
+        copyTrimmed(rest, nick, sizeof(nick));
+        if (!nick[0]) {
+          printMessage(COLOR_RED, "[!] ", "Usage: /nick <contact> <name>\n");
+          return true;
+        }
+        handleNickCommand(first, nick);
+        return true;
+      }
+    }
+
+    if (g_dm.active) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(args, nick, sizeof(nick));
+      handleNickCommand("@", nick);
+      return true;
+    }
+
+    if (rest && rest[0]) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(rest, nick, sizeof(nick));
+      handleNickCommand(first, nick);
+      return true;
+    }
+
+    printMessage(COLOR_RED, "[!] ", "Usage: /nick [@|contact] <name>\n");
     return true;
   }
   if (strcmp(message, "/clear") == 0) {

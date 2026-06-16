@@ -30,6 +30,7 @@ echo "Compiling client..."
     ../Utils/socketUtil.c \
     ../Utils/sha256.c \
     ../Utils/aes.c \
+    ../Utils/contacts.c \
     ../Utils/identity.c \
     ../Utils/ecdh.c \
     ../Utils/history.c \

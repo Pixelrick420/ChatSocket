@@ -13,6 +13,7 @@ echo "Building TUI client..."
     ../Utils/socketUtil.c \
     ../Utils/sha256.c \
     ../Utils/aes.c \
+    ../Utils/contacts.c \
     ../Utils/identity.c \
     ../Utils/tls.c \
     ../Utils/ecdh.c \

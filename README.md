@@ -115,10 +115,12 @@ If your system uses another package manager, install the dependencies manually a
 - `/create <room> -p <secret>`: create a protected room
 - `/enter <room>`: enter a room
 - `/leave`: leave the current room
-- `/dm <token|nick|prefix>`: start a DM
+- `/dm <contact>`: start a DM by number, nickname, token prefix, or full token
 - `/dmleave`: close the active DM session
-- `/list`: load locally-known DM history
-- `/nick <token|nick|prefix> <name>`: save a local nickname for a DM peer
+- `/list`: show your locally-known DM contacts in recent-first order
+- `/search <query>`: search contacts the way you would in a messaging app
+- `/nick [@|contact] <name>`: save a local nickname for the active DM or any contact
+- `/nick <contact> -`: clear a saved nickname
 - `/token`: show your identity token
 - `/help`: show help
 - `/exit`: disconnect

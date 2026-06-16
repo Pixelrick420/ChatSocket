@@ -1,4 +1,5 @@
 #include "../Utils/aes.h"
+#include "../Utils/contacts.h"
 #include "../Utils/ecdh.h"
 #include "../Utils/history.h"
 #include "../Utils/identity.h"
@@ -6,6 +7,7 @@
 #include "../Utils/socketUtil.h"
 #include "../Utils/tls.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
@@ -107,9 +109,7 @@ static bool g_roomsLoading = false;
 static char g_rooms[50][MAX_NAME_LEN] = {{0}};
 static char g_roomTypes[50][16] = {{0}};
 static int g_roomCount = 0;
-static char g_dmList[MAX_DM_NICKS][TOKEN_STR_SIZE] = {{0}};
-static char g_dmNick[MAX_DM_NICKS][MAX_NAME_LEN] = {{0}};
-static int g_dmCount = 0;
+static ContactBook g_contacts = {0};
 static int g_cursorRow = 1;
 static int g_cursorCol = 1;
 static bool g_cursorVisible = false;
@@ -341,77 +341,149 @@ static void clearDmSession(void) {
   memset(&g_dm, 0, sizeof(g_dm));
 }
 
-static void reloadDmNicknames(void) {
-  memset(g_dmNick, 0, sizeof(g_dmNick));
-  DmNickEntry entries[MAX_DM_NICKS];
-  size_t count = identityLoadDmNickEntries(entries, MAX_DM_NICKS);
-  for (size_t i = 0; i < count; i++) {
-    for (int j = 0; j < g_dmCount; j++) {
-      if (strcmp(g_dmList[j], entries[i].token) == 0) {
-        snprintf(g_dmNick[j], sizeof(g_dmNick[j]), "%s", entries[i].nick);
-        break;
-      }
-    }
-  }
-}
-
 static void reloadDmHistoryIndex(void) {
-  g_dmCount = historyGetAll(g_dmList);
-  reloadDmNicknames();
+  contactsLoad(&g_contacts);
+  if (g_dm.peerToken[0])
+    contactsRememberToken(&g_contacts, g_dm.peerToken);
 }
 
 static void saveDmNicknames(void) {
-  DmNickEntry entries[MAX_DM_NICKS];
-  size_t count = 0;
-  for (int i = 0; i < g_dmCount && count < MAX_DM_NICKS; i++) {
-    if (!g_dmList[i][0] || !g_dmNick[i][0])
-      continue;
-    snprintf(entries[count].token, sizeof(entries[count].token), "%s", g_dmList[i]);
-    snprintf(entries[count].nick, sizeof(entries[count].nick), "%s", g_dmNick[i]);
-    count++;
-  }
-  identitySaveDmNickEntries(entries, count);
+  contactsSaveNicknames(&g_contacts);
 }
 
 static void rememberDmToken(const char *token) {
-  for (int i = 0; i < g_dmCount; i++) {
-    if (strcmp(g_dmList[i], token) == 0)
-      return;
-  }
-  if (g_dmCount < MAX_DM_NICKS) {
-    snprintf(g_dmList[g_dmCount], sizeof(g_dmList[g_dmCount]), "%s", token);
-    g_dmCount++;
-  }
-}
-
-static int findDmByToken(const char *token) {
-  if (!token || !token[0])
-    return -1;
-
-  for (int i = 0; i < g_dmCount; i++) {
-    if (strcmp(g_dmList[i], token) == 0)
-      return i;
-  }
-  return -1;
+  contactsRememberToken(&g_contacts, token);
 }
 
 static void formatDmLabel(const char *token, char *out, size_t outSize) {
-  if (!out || outSize == 0) {
+  contactsFormatLabel(&g_contacts, token, out, outSize);
+}
+
+static int dmContactCount(void) {
+  return (int)g_contacts.count;
+}
+
+static bool isTokenHex(const char *text) {
+  if (!text || strlen(text) != TOKEN_HEX_LEN)
+    return false;
+  for (size_t i = 0; text[i]; i++) {
+    if (!isxdigit((unsigned char)text[i]))
+      return false;
+  }
+  return true;
+}
+
+static const char *skipSpaces(const char *text) {
+  while (text && *text == ' ')
+    text++;
+  return text;
+}
+
+static void copyTrimmed(const char *input, char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  out[0] = '\0';
+  if (!input)
+    return;
+
+  input = skipSpaces(input);
+  size_t len = strlen(input);
+  while (len > 0 && input[len - 1] == ' ')
+    len--;
+  if (len >= outSize)
+    len = outSize - 1;
+  memcpy(out, input, len);
+  out[len] = '\0';
+}
+
+static bool splitFirstArgument(const char *input, char *first,
+                               size_t firstSize, const char **restOut) {
+  if (!first || firstSize == 0)
+    return false;
+
+  first[0] = '\0';
+  if (restOut)
+    *restOut = NULL;
+
+  input = skipSpaces(input);
+  if (!input || !input[0])
+    return false;
+
+  size_t rawLen = 0;
+  while (input[rawLen] && input[rawLen] != ' ')
+    rawLen++;
+  size_t copyLen = rawLen;
+  if (copyLen >= firstSize)
+    copyLen = firstSize - 1;
+  memcpy(first, input, copyLen);
+  first[copyLen] = '\0';
+
+  if (restOut)
+    *restOut = skipSpaces(input + rawLen);
+  return true;
+}
+
+static void showContactMatches(const char *query, const ContactMatch *matches,
+                               size_t matchCount) {
+  if (matchCount == 0) {
+    addMessage(UI_MSG_ERROR, "[!] No contact matches \"%s\"", query);
     return;
   }
 
-  int idx = findDmByToken(token);
-  if (idx >= 0 && g_dmNick[idx][0]) {
-    snprintf(out, outSize, "%s", g_dmNick[idx]);
-    return;
+  addMessage(UI_MSG_INFO, "[*] Contacts matching \"%s\":", query);
+  for (size_t i = 0; i < matchCount; i++) {
+    char reference[128];
+    contactsFormatReference(&g_contacts, matches[i].index, reference,
+                            sizeof(reference));
+    addMessage(UI_MSG_INFO, "    %zu. %s", matches[i].index + 1, reference);
+  }
+}
+
+static bool resolveDmReference(const char *input, char *tokenOut,
+                               size_t tokenOutSize, bool allowDirectToken,
+                               bool announceAmbiguity) {
+  if (!tokenOut || tokenOutSize == 0)
+    return false;
+
+  char query[128];
+  copyTrimmed(input, query, sizeof(query));
+  if (!query[0]) {
+    if (announceAmbiguity)
+      addMessage(UI_MSG_ERROR, "[!] Contact reference is empty");
+    return false;
   }
 
-  if (token && token[0]) {
-    snprintf(out, outSize, "%.12s", token);
-    return;
+  ContactMatch matches[8];
+  size_t matchCount = 0;
+  ContactLookupStatus status =
+      contactsLookup(&g_contacts, query, matches, 8, &matchCount);
+  if (status == CONTACT_LOOKUP_UNIQUE && matchCount > 0) {
+    const DmContact *contact = contactsGet(&g_contacts, matches[0].index);
+    if (!contact)
+      return false;
+    snprintf(tokenOut, tokenOutSize, "%s", contact->token);
+    return true;
   }
 
-  snprintf(out, outSize, "none");
+  if (status == CONTACT_LOOKUP_AMBIGUOUS) {
+    if (announceAmbiguity) {
+      addMessage(UI_MSG_ERROR,
+                 "[!] Multiple contacts match \"%s\". Use /search or a number.",
+                 query);
+      showContactMatches(query, matches, matchCount);
+    }
+    return false;
+  }
+
+  if (allowDirectToken && isTokenHex(query)) {
+    snprintf(tokenOut, tokenOutSize, "%s", query);
+    return true;
+  }
+
+  if (announceAmbiguity)
+    addMessage(UI_MSG_ERROR, "[!] No contact matches \"%s\"", query);
+  return false;
 }
 
 static void formatContextLabel(char *out, size_t outSize) {
@@ -501,21 +573,6 @@ static int wrapTextToWidth(const char *text, int width,
   }
 
   return count;
-}
-
-static int findDmByReference(const char *input) {
-  if (!input || !input[0])
-    return -1;
-
-  for (int i = 0; i < g_dmCount; i++) {
-    if (g_dmNick[i][0] && strcmp(g_dmNick[i], input) == 0)
-      return i;
-  }
-  for (int i = 0; i < g_dmCount; i++) {
-    if (strncmp(g_dmList[i], input, strlen(input)) == 0)
-      return i;
-  }
-  return -1;
 }
 
 static bool sendRawFrame(const char *frame) {
@@ -614,7 +671,10 @@ static void showRoomMessage(const char *sender, const char *payload) {
 
 static void showDmMessage(const char *senderToken, const char *payload) {
   if (!g_dm.active || strcmp(g_dm.peerToken, senderToken) != 0) {
-    addMessage(UI_MSG_INFO, "[*] Received a DM for an inactive session");
+    char dmLabel[64];
+    formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+    addMessage(UI_MSG_INFO, "[*] Received a DM for inactive contact %s",
+               dmLabel);
     return;
   }
 
@@ -714,7 +774,9 @@ static void handleDmInit(const char *senderToken, const char *peerPubHex,
   memcpy(g_dm.key, sessionKey, sizeof(sessionKey));
   memset(myPriv, 0, sizeof(myPriv));
   rememberDmToken(senderToken);
-  addMessage(UI_MSG_INFO, "[*] DM session established");
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  addMessage(UI_MSG_INFO, "[*] DM session established with %s", dmLabel);
 }
 
 static void handleDmAck(const char *senderToken, const char *peerPubHex,
@@ -748,7 +810,9 @@ static void handleDmAck(const char *senderToken, const char *peerPubHex,
   memset(g_dm.pendingPriv, 0, sizeof(g_dm.pendingPriv));
   memset(g_dm.pendingPub, 0, sizeof(g_dm.pendingPub));
   rememberDmToken(senderToken);
-  addMessage(UI_MSG_INFO, "[*] DM session ready");
+  char dmLabel[64];
+  formatDmLabel(senderToken, dmLabel, sizeof(dmLabel));
+  addMessage(UI_MSG_INFO, "[*] DM session ready with %s", dmLabel);
 }
 
 static void displayIncomingMessage(char *buffer) {
@@ -994,24 +1058,32 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
     row++;
 
   char dmCountText[32];
-  snprintf(dmCountText, sizeof(dmCountText), "(%d)", g_dmCount);
+  snprintf(dmCountText, sizeof(dmCountText), "(%d)", dmContactCount());
   if (row < endRow)
     uiDrawSectionLabel(row++, x + 2, contentW, "DIRECT", dmCountText, theme);
-  if (g_dmCount == 0 && row < endRow) {
+  if (dmContactCount() == 0 && row < endRow) {
     uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
                theme->panelR, theme->panelG, theme->panelB,
                "No DM history yet");
   }
-  for (int i = 0; i < g_dmCount && row < endRow; i++) {
-    char dmLabel[64];
-    formatDmLabel(g_dmList[i], dmLabel, sizeof(dmLabel));
+  for (int i = 0; i < dmContactCount() && row < endRow; i++) {
+    const DmContact *contact = contactsGet(&g_contacts, (size_t)i);
+    if (!contact)
+      continue;
     char line[128];
-    snprintf(line, sizeof(line), "%c %-20.20s",
-             strcmp(g_dmList[i], g_dm.peerToken) == 0 ? '>' : ' ', dmLabel);
+    if (contact->nickname[0]) {
+      snprintf(line, sizeof(line), "%c %2d %-12.12s %.6s",
+               strcmp(contact->token, g_dm.peerToken) == 0 ? '>' : ' ', i + 1,
+               contact->nickname, contact->token);
+    } else {
+      snprintf(line, sizeof(line), "%c %2d %.16s",
+               strcmp(contact->token, g_dm.peerToken) == 0 ? '>' : ' ', i + 1,
+               contact->token);
+    }
     uiDrawText(row++, x + 2,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 144 : 223,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 224 : 228,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 203 : 231,
+               strcmp(contact->token, g_dm.peerToken) == 0 ? 144 : 223,
+               strcmp(contact->token, g_dm.peerToken) == 0 ? 224 : 228,
+               strcmp(contact->token, g_dm.peerToken) == 0 ? 203 : 231,
                theme->panelR, theme->panelG, theme->panelB, line);
   }
 }
@@ -1052,7 +1124,8 @@ static void uiDrawInput(int x, int y, int w, int h) {
   } else {
     snprintf(prompt, sizeof(prompt), "lobby");
     snprintf(meta, sizeof(meta), "commands");
-    snprintf(note, sizeof(note), "Use /rooms, /enter, /create, /dm, or /help.");
+    snprintf(note, sizeof(note),
+             "Use /search, /rooms, /enter, /create, /dm, or /help.");
   }
 
   char countText[32];
@@ -1138,9 +1211,9 @@ static void uiDrawHelp(int rows, int cols) {
              theme->panelB, "/enter <room>   /leave");
   uiDrawSectionLabel(y + 6, x + 2, w - 4, "DIRECT", NULL, theme);
   uiDrawText(y + 7, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/dm <token|nick|prefix>   /dmleave   /list");
+             theme->panelB, "/dm <contact>   /dmleave   /list   /search <query>");
   uiDrawText(y + 8, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/nick <target> <name>   /token");
+             theme->panelB, "/nick [@|contact] <name>   /nick <contact> -   /token");
   uiDrawSectionLabel(y + 10, x + 2, w - 4, "BASICS", NULL, theme);
   uiDrawText(y + 11, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
              theme->panelB, "/name <name>   /help   /exit");
@@ -1330,44 +1403,67 @@ static void handleTokenCommand(void) {
 
 static void handleListCommand(void) {
   reloadDmHistoryIndex();
-  addMessage(UI_MSG_INFO, "[*] Loaded %d DM conversations", g_dmCount);
+  if (dmContactCount() == 0) {
+    addMessage(UI_MSG_INFO, "[*] No DM contacts yet");
+    return;
+  }
+
+  addMessage(UI_MSG_INFO, "[*] Direct contacts:");
+  for (int i = 0; i < dmContactCount(); i++) {
+    char reference[128];
+    contactsFormatReference(&g_contacts, (size_t)i, reference,
+                            sizeof(reference));
+    addMessage(UI_MSG_INFO, "    %d. %s", i + 1, reference);
+  }
 }
 
 static void handleNickCommand(const char *target, const char *nick) {
   reloadDmHistoryIndex();
-  int idx = findDmByReference(target);
-  if (idx < 0) {
-    addMessage(UI_MSG_ERROR, "[!] DM not found");
+
+  char token[TOKEN_STR_SIZE] = {0};
+  if (!target || !target[0] || strcmp(target, "@") == 0) {
+    if (!g_dm.active) {
+      addMessage(UI_MSG_ERROR, "[!] Start a DM first or pass a contact reference");
+      return;
+    }
+    snprintf(token, sizeof(token), "%s", g_dm.peerToken);
+  } else if (!resolveDmReference(target, token, sizeof(token), true, true)) {
     return;
   }
 
-  for (size_t i = 0; nick[i]; i++) {
-    unsigned char ch = (unsigned char)nick[i];
-    if (!(isalnum(ch) || ch == '-' || ch == '_')) {
-      addMessage(UI_MSG_ERROR, "[!] Nicknames may use letters, digits, - and _");
+  if (strcmp(nick, "-") == 0) {
+    if (!contactsClearNickname(&g_contacts, token)) {
+      addMessage(UI_MSG_ERROR, "[!] No nickname is set for that contact");
       return;
     }
+    saveDmNicknames();
+    addMessage(UI_MSG_INFO, "[*] Nickname cleared");
+    return;
   }
 
-  snprintf(g_dmNick[idx], sizeof(g_dmNick[idx]), "%s", nick);
+  char error[128];
+  if (!contactsSetNickname(&g_contacts, token, nick, error, sizeof(error))) {
+    addMessage(UI_MSG_ERROR, "[!] %s", error);
+    return;
+  }
   saveDmNicknames();
   addMessage(UI_MSG_INFO, "[*] Nickname saved");
+}
+
+static void handleSearchCommand(const char *query) {
+  reloadDmHistoryIndex();
+
+  ContactMatch matches[8];
+  size_t matchCount = contactsSearch(&g_contacts, query, matches, 8);
+  showContactMatches(query, matches, matchCount);
 }
 
 static void handleDmCommand(const char *input) {
   reloadDmHistoryIndex();
 
   char token[TOKEN_STR_SIZE] = {0};
-  if (strlen(input) == TOKEN_HEX_LEN) {
-    snprintf(token, sizeof(token), "%s", input);
-  } else {
-    int idx = findDmByReference(input);
-    if (idx < 0) {
-      addMessage(UI_MSG_ERROR, "[!] Unknown DM reference");
-      return;
-    }
-    snprintf(token, sizeof(token), "%s", g_dmList[idx]);
-  }
+  if (!resolveDmReference(input, token, sizeof(token), true, true))
+    return;
 
   unsigned char myPub[32];
   unsigned char myPriv[32];
@@ -1402,7 +1498,9 @@ static void handleDmCommand(const char *input) {
   memcpy(g_dm.pendingPub, myPub, sizeof(g_dm.pendingPub));
   memset(myPriv, 0, sizeof(myPriv));
   rememberDmToken(token);
-  addMessage(UI_MSG_INFO, "[*] DM request sent");
+  char dmLabel[64];
+  formatDmLabel(token, dmLabel, sizeof(dmLabel));
+  addMessage(UI_MSG_INFO, "[*] DM request sent to %s", dmLabel);
 }
 
 static bool processCommand(char *message) {
@@ -1484,6 +1582,16 @@ static bool processCommand(char *message) {
     handleListCommand();
     return true;
   }
+  if (strncmp(message, "/search ", 8) == 0) {
+    char query[128];
+    copyTrimmed(message + 8, query, sizeof(query));
+    if (!query[0]) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /search <query>");
+      return true;
+    }
+    handleSearchCommand(query);
+    return true;
+  }
   if (strcmp(message, "/token") == 0) {
     handleTokenCommand();
     return true;
@@ -1495,21 +1603,64 @@ static bool processCommand(char *message) {
   }
   if (strncmp(message, "/dm ", 4) == 0) {
     char target[128];
-    if (sscanf(message + 4, "%127s", target) != 1) {
-      addMessage(UI_MSG_ERROR, "[!] Usage: /dm <token|nick|prefix>");
+    copyTrimmed(message + 4, target, sizeof(target));
+    if (!target[0]) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /dm <contact>");
       return true;
     }
     handleDmCommand(target);
     return true;
   }
   if (strncmp(message, "/nick ", 6) == 0) {
-    char target[128];
-    char nick[MAX_NAME_LEN];
-    if (sscanf(message + 6, "%127s %63s", target, nick) != 2) {
-      addMessage(UI_MSG_ERROR, "[!] Usage: /nick <target> <name>");
+    const char *args = skipSpaces(message + 6);
+    char first[128];
+    const char *rest = NULL;
+    if (!splitFirstArgument(args, first, sizeof(first), &rest) || !first[0]) {
+      addMessage(UI_MSG_ERROR, "[!] Usage: /nick [@|contact] <name>");
       return true;
     }
-    handleNickCommand(target, nick);
+
+    if (strcmp(first, "@") == 0) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(rest, nick, sizeof(nick));
+      if (!nick[0]) {
+        addMessage(UI_MSG_ERROR, "[!] Usage: /nick @ <name>");
+        return true;
+      }
+      handleNickCommand("@", nick);
+      return true;
+    }
+
+    if (rest && rest[0]) {
+      char probeToken[TOKEN_STR_SIZE];
+      if (!g_dm.active ||
+          resolveDmReference(first, probeToken, sizeof(probeToken), true, false)) {
+        char nick[MAX_NAME_LEN];
+        copyTrimmed(rest, nick, sizeof(nick));
+        if (!nick[0]) {
+          addMessage(UI_MSG_ERROR, "[!] Usage: /nick <contact> <name>");
+          return true;
+        }
+        handleNickCommand(first, nick);
+        return true;
+      }
+    }
+
+    if (g_dm.active) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(args, nick, sizeof(nick));
+      handleNickCommand("@", nick);
+      return true;
+    }
+
+    if (rest && rest[0]) {
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(rest, nick, sizeof(nick));
+      handleNickCommand(first, nick);
+      return true;
+    }
+
+    addMessage(UI_MSG_ERROR, "[!] Usage: /nick [@|contact] <name>");
     return true;
   }
 
