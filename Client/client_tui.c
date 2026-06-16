@@ -37,6 +37,21 @@ typedef struct {
 } UiMessage;
 
 typedef struct {
+  int panelR;
+  int panelG;
+  int panelB;
+  int borderR;
+  int borderG;
+  int borderB;
+  int accentR;
+  int accentG;
+  int accentB;
+  int mutedR;
+  int mutedG;
+  int mutedB;
+} UiTheme;
+
+typedef struct {
   bool active;
   bool protectedRoom;
   char currentName[MAX_NAME_LEN];
@@ -95,6 +110,9 @@ static int g_roomCount = 0;
 static char g_dmList[MAX_DM_NICKS][TOKEN_STR_SIZE] = {{0}};
 static char g_dmNick[MAX_DM_NICKS][MAX_NAME_LEN] = {{0}};
 static int g_dmCount = 0;
+static int g_cursorRow = 1;
+static int g_cursorCol = 1;
+static bool g_cursorVisible = false;
 
 static void clientLog(const char *fmt, ...) PRINTF_FMT(1, 2);
 static void addMessage(UiMessageTone tone, const char *fmt, ...)
@@ -105,6 +123,14 @@ static const char *UI_HIDE_CURSOR = "\033[?25l";
 static const char *UI_SHOW_CURSOR = "\033[?25h";
 static const char *UI_ALT_ON = "\033[?1049h";
 static const char *UI_ALT_OFF = "\033[?1049l";
+static const UiTheme UI_THEME_ACTIVITY = {22, 26, 34, 62, 96, 136, 166, 204, 255,
+                                          122, 144, 170};
+static const UiTheme UI_THEME_NAV = {30, 24, 20, 129, 95, 45, 239, 196, 106,
+                                     161, 139, 112};
+static const UiTheme UI_THEME_INPUT = {20, 28, 28, 48, 113, 104, 144, 224, 203,
+                                       122, 150, 147};
+static const UiTheme UI_THEME_HELP = {30, 24, 36, 116, 92, 152, 219, 198, 255,
+                                      150, 138, 172};
 
 static void logOpen(void) {
   char configDir[512];
@@ -191,9 +217,16 @@ static void uiDrawTextRight(int row, int rightCol, int fgR, int fgG, int fgB,
   uiDrawText(row, start, fgR, fgG, fgB, bgR, bgG, bgB, text);
 }
 
+static int clampInt(int value, int minValue, int maxValue) {
+  if (value < minValue)
+    return minValue;
+  if (value > maxValue)
+    return maxValue;
+  return value;
+}
+
 static void uiDrawSectionLabel(int row, int col, int width, const char *title,
-                               const char *value) {
-  int panelR = 24, panelG = 29, panelB = 36;
+                               const char *value, const UiTheme *theme) {
   char line[128];
   if (value && value[0]) {
     snprintf(line, sizeof(line), "%s %s", title, value);
@@ -202,19 +235,19 @@ static void uiDrawSectionLabel(int row, int col, int width, const char *title,
   }
   char padded[128];
   snprintf(padded, sizeof(padded), "%-*.*s", width, width, line);
-  uiDrawText(row, col, 166, 191, 255, panelR, panelG, panelB, padded);
+  uiDrawText(row, col, theme->accentR, theme->accentG, theme->accentB,
+             theme->panelR, theme->panelG, theme->panelB, padded);
 }
 
-static void uiDrawBox(int x, int y, int w, int h, const char *title) {
+static void uiDrawBox(int x, int y, int w, int h, const char *title,
+                      const UiTheme *theme) {
   if (w < 4 || h < 3)
     return;
 
-  int borderR = 60, borderG = 71, borderB = 89;
-  int panelR = 24, panelG = 29, panelB = 36;
   for (int row = 0; row < h; row++) {
     uiMove(y + row, x);
-    uiRgbBg(panelR, panelG, panelB);
-    uiRgbFg(borderR, borderG, borderB);
+    uiRgbBg(theme->panelR, theme->panelG, theme->panelB);
+    uiRgbFg(theme->borderR, theme->borderG, theme->borderB);
     if (row == 0) {
       putchar('+');
       for (int i = 0; i < w - 2; i++)
@@ -237,7 +270,8 @@ static void uiDrawBox(int x, int y, int w, int h, const char *title) {
   if (title && title[0] && w > 6) {
     char titleBuf[128];
     snprintf(titleBuf, sizeof(titleBuf), " %s ", title);
-    uiDrawText(y, x + 2, 166, 191, 255, panelR, panelG, panelB, titleBuf);
+    uiDrawText(y, x + 2, theme->accentR, theme->accentG, theme->accentB,
+               theme->panelR, theme->panelG, theme->panelB, titleBuf);
   }
 }
 
@@ -255,7 +289,6 @@ static void uiGetSize(int *rows, int *cols) {
 
 static void uiEnter(void) {
   print(UI_ALT_ON);
-  print(UI_HIDE_CURSOR);
   uiClearScreen();
 }
 
@@ -263,6 +296,12 @@ static void uiExit(void) {
   print(UI_RESET);
   print(UI_SHOW_CURSOR);
   print(UI_ALT_OFF);
+}
+
+static void uiSetCursor(int row, int col) {
+  g_cursorRow = row;
+  g_cursorCol = col;
+  g_cursorVisible = true;
 }
 
 static void addMessage(UiMessageTone tone, const char *fmt, ...) {
@@ -807,7 +846,7 @@ static void *receiveThread(void *arg) {
 }
 
 static void uiDrawMessages(int x, int y, int w, int h) {
-  int panelR = 24, panelG = 29, panelB = 36;
+  const UiTheme *theme = &UI_THEME_ACTIVITY;
   int visible = h - 2;
   int contentW = w - 4;
   if (visible <= 0 || contentW <= 0)
@@ -884,12 +923,13 @@ static void uiDrawMessages(int x, int y, int w, int h) {
 
     char padded[UI_RENDER_LINE_MAX];
     snprintf(padded, sizeof(padded), "%-*.*s", contentW, contentW, rendered[row]);
-    uiDrawText(y + 1 + row, x + 2, fgR, fgG, fgB, panelR, panelG, panelB, padded);
+    uiDrawText(y + 1 + row, x + 2, fgR, fgG, fgB, theme->panelR, theme->panelG,
+               theme->panelB, padded);
   }
 }
 
 static void uiDrawSidebar(int x, int y, int w, int h) {
-  int panelR = 24, panelG = 29, panelB = 36;
+  const UiTheme *theme = &UI_THEME_NAV;
   int contentW = w - 4;
   int row = y + 1;
   int endRow = y + h - 1;
@@ -899,26 +939,30 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   formatContextLabel(context, sizeof(context));
   formatSecurityLabel(security, sizeof(security));
 
-  uiDrawSectionLabel(row++, x + 2, contentW, "SESSION", NULL);
+  uiDrawSectionLabel(row++, x + 2, contentW, "SESSION", NULL, theme);
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "mode      %s", context);
-    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
+    snprintf(line, sizeof(line), "you    %s", g_username);
+    uiDrawText(row++, x + 2, 223, 228, 231, theme->panelR, theme->panelG,
+               theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "security  %s", security);
-    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
+    snprintf(line, sizeof(line), "space  %s", context);
+    uiDrawText(row++, x + 2, 223, 228, 231, theme->panelR, theme->panelG,
+               theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "identity  %s", g_username);
-    uiDrawText(row++, x + 2, 191, 203, 214, panelR, panelG, panelB, line);
+    snprintf(line, sizeof(line), "lock   %s", security);
+    uiDrawText(row++, x + 2, theme->accentR, theme->accentG, theme->accentB,
+               theme->panelR, theme->panelG, theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "relay     %.20s", g_serverLabel);
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB, line);
+    snprintf(line, sizeof(line), "relay  %.20s", g_serverLabel);
+    uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB, line);
   }
 
   if (row < endRow)
@@ -927,21 +971,23 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   char roomsCount[32];
   snprintf(roomsCount, sizeof(roomsCount), "(%d)", g_roomCount);
   if (row < endRow)
-    uiDrawSectionLabel(row++, x + 2, contentW, "ROOMS", roomsCount);
+    uiDrawSectionLabel(row++, x + 2, contentW, "ROOMS", roomsCount, theme);
   if (g_roomCount == 0 && row < endRow) {
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+    uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB,
                "No rooms cached yet");
   }
   for (int i = 0; i < g_roomCount && row < endRow; i++) {
     char line[128];
-    snprintf(line, sizeof(line), "%c %-18.18s [%c]",
-             strcmp(g_rooms[i], g_room.currentName) == 0 ? '>' : ' ',
-             g_rooms[i], strcmp(g_roomTypes[i], "PROTECTED") == 0 ? 'P' : 'O');
+    const char marker =
+        strcmp(g_rooms[i], g_room.currentName) == 0 ? '>' : ' ';
+    const char *roomType =
+        strcmp(g_roomTypes[i], "PROTECTED") == 0 ? "locked" : "open";
+    snprintf(line, sizeof(line), "%c %-14.14s %-6s", marker, g_rooms[i], roomType);
     uiDrawText(row++, x + 2,
-               strcmp(g_rooms[i], g_room.currentName) == 0 ? 233 : 191,
-               strcmp(g_rooms[i], g_room.currentName) == 0 ? 237 : 203,
-               strcmp(g_rooms[i], g_room.currentName) == 0 ? 243 : 214,
-               panelR, panelG, panelB, line);
+               marker == '>' ? 246 : 223, marker == '>' ? 214 : 228,
+               marker == '>' ? 133 : 231, theme->panelR, theme->panelG,
+               theme->panelB, line);
   }
 
   if (row < endRow)
@@ -950,9 +996,10 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   char dmCountText[32];
   snprintf(dmCountText, sizeof(dmCountText), "(%d)", g_dmCount);
   if (row < endRow)
-    uiDrawSectionLabel(row++, x + 2, contentW, "DMS", dmCountText);
+    uiDrawSectionLabel(row++, x + 2, contentW, "DIRECT", dmCountText, theme);
   if (g_dmCount == 0 && row < endRow) {
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
+    uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB,
                "No DM history yet");
   }
   for (int i = 0; i < g_dmCount && row < endRow; i++) {
@@ -962,61 +1009,64 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
     snprintf(line, sizeof(line), "%c %-20.20s",
              strcmp(g_dmList[i], g_dm.peerToken) == 0 ? '>' : ' ', dmLabel);
     uiDrawText(row++, x + 2,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 152 : 191,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 195 : 203,
-               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 121 : 214,
-               panelR, panelG, panelB, line);
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 144 : 223,
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 224 : 228,
+               strcmp(g_dmList[i], g_dm.peerToken) == 0 ? 203 : 231,
+               theme->panelR, theme->panelG, theme->panelB, line);
   }
-
-  if (row < endRow)
-    row++;
-  if (row < endRow)
-    uiDrawSectionLabel(row++, x + 2, contentW, "HINTS", NULL);
-  if (row < endRow)
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
-               "Enter send or submit");
-  if (row < endRow)
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
-               "Up/Down scroll | PgUp/PgDn jump");
-  if (row < endRow)
-    uiDrawText(row++, x + 2, 127, 140, 156, panelR, panelG, panelB,
-               "? toggles help");
 }
 
 static void uiDrawInput(int x, int y, int w, int h) {
-  int panelR = 18, panelG = 23, panelB = 30;
-  if (h < 5)
+  const UiTheme *theme = &UI_THEME_INPUT;
+  if (h < 4)
+    return;
+
+  int contentW = w - 4;
+  int textW = w - 7;
+  if (contentW <= 0 || textW <= 0)
     return;
 
   char prompt[96];
-  char hint[160];
+  char note[160];
+  char meta[64];
   if (g_input.readingRoomSecret) {
-    snprintf(prompt, sizeof(prompt), "Submit room secret for #%s",
+    snprintf(prompt, sizeof(prompt), "secret for #%s",
              g_room.pendingName[0] ? g_room.pendingName : "room");
-    snprintf(hint, sizeof(hint),
-             "The secret is masked locally. Only a verifier is sent to the relay.");
+    snprintf(meta, sizeof(meta), "verifier only");
+    snprintf(note, sizeof(note),
+             "Local masking stays on while you type.");
   } else if (g_dm.active) {
     char dmLabel[64];
     formatDmLabel(g_dm.peerToken, dmLabel, sizeof(dmLabel));
-    snprintf(prompt, sizeof(prompt), "Message %s", dmLabel);
-    snprintf(hint, sizeof(hint), "Secure DM is live. Use /dmleave to close it.");
+    snprintf(prompt, sizeof(prompt), "direct to %s", dmLabel);
+    snprintf(meta, sizeof(meta), "dm e2e");
+    snprintf(note, sizeof(note), "Handshake is live. /dmleave exits the session.");
   } else if (g_room.active) {
-    snprintf(prompt, sizeof(prompt), "Message #%s", g_room.currentName);
-    snprintf(hint, sizeof(hint), "%s",
+    snprintf(prompt, sizeof(prompt), "room #%s", g_room.currentName);
+    snprintf(meta, sizeof(meta), "%s",
+             g_room.protectedRoom ? "room e2e" : "relay-visible");
+    snprintf(note, sizeof(note), "%s",
              g_room.protectedRoom
-                 ? "Protected room messages are encrypted before they leave the client."
-                 : "Open room messages are readable by the relay.");
+                 ? "Messages encrypt before they leave this terminal."
+                 : "This room is not end-to-end encrypted.");
   } else {
-    snprintf(prompt, sizeof(prompt), "Lobby command");
-    snprintf(hint, sizeof(hint), "Try /rooms, /create <room>, /enter <room>, /dm, or /help.");
+    snprintf(prompt, sizeof(prompt), "lobby");
+    snprintf(meta, sizeof(meta), "commands");
+    snprintf(note, sizeof(note), "Use /rooms, /enter, /create, /dm, or /help.");
   }
 
   char countText[32];
   size_t currentLen =
       g_input.readingRoomSecret ? g_input.roomSecretLen : g_input.length;
-  snprintf(countText, sizeof(countText), "%zu/%d", currentLen, MSG_SIZE - 1);
-  uiDrawText(y + 1, x + 2, 166, 191, 255, panelR, panelG, panelB, prompt);
-  uiDrawTextRight(y + 1, x + w - 3, 127, 140, 156, panelR, panelG, panelB,
+  snprintf(countText, sizeof(countText), "%s  %zu/%d", meta, currentLen,
+           MSG_SIZE - 1);
+
+  char promptLine[UI_RENDER_LINE_MAX];
+  snprintf(promptLine, sizeof(promptLine), "%-*.*s", contentW, contentW, prompt);
+  uiDrawText(y + 1, x + 2, theme->accentR, theme->accentG, theme->accentB,
+             theme->panelR, theme->panelG, theme->panelB, promptLine);
+  uiDrawTextRight(y + 1, x + w - 3, theme->mutedR, theme->mutedG,
+                  theme->mutedB, theme->panelR, theme->panelG, theme->panelB,
                   countText);
 
   char content[MSG_SIZE];
@@ -1030,78 +1080,119 @@ static void uiDrawInput(int x, int y, int w, int h) {
     snprintf(content, sizeof(content), "%s", g_input.buffer);
   }
 
-  if (!content[0]) {
-    snprintf(content, sizeof(content), "%s",
-             g_input.readingRoomSecret ? "" : "Type a message or command here");
+  bool hasInput = currentLen > 0;
+  const char *placeholder = g_input.readingRoomSecret
+                                ? ""
+                                : "Type a message or command";
+  int scrollStart = 0;
+  if (hasInput && (int)currentLen > textW)
+    scrollStart = (int)currentLen - textW;
+
+  char visible[UI_RENDER_LINE_MAX];
+  if (hasInput) {
+    snprintf(visible, sizeof(visible), "%.*s", textW, content + scrollStart);
+  } else {
+    snprintf(visible, sizeof(visible), "%s", placeholder);
   }
 
-  char clipped[UI_RENDER_LINE_MAX];
-  snprintf(clipped, sizeof(clipped), "%-*.*s", w - 4, w - 4, content);
-  uiDrawText(y + 2, x + 2,
-             g_input.readingRoomSecret || g_input.buffer[0] ? 233 : 127,
-             g_input.readingRoomSecret || g_input.buffer[0] ? 237 : 140,
-             g_input.readingRoomSecret || g_input.buffer[0] ? 243 : 156,
-             panelR, panelG, panelB, clipped);
+  char inputLine[UI_RENDER_LINE_MAX];
+  snprintf(inputLine, sizeof(inputLine), "%-*.*s", textW, textW, visible);
+  uiDrawText(y + 2, x + 2, theme->accentR, theme->accentG, theme->accentB,
+             theme->panelR, theme->panelG, theme->panelB, "> ");
+  uiDrawText(y + 2, x + 4,
+             hasInput ? 233 : theme->mutedR,
+             hasInput ? 237 : theme->mutedG,
+             hasInput ? 243 : theme->mutedB,
+             theme->panelR, theme->panelG, theme->panelB, inputLine);
 
-  char hintLine[UI_RENDER_LINE_MAX];
-  snprintf(hintLine, sizeof(hintLine), "%-*.*s", w - 4, w - 4, hint);
-  uiDrawText(y + 3, x + 2, 127, 140, 156, panelR, panelG, panelB, hintLine);
+  if (h >= 5) {
+    char noteLine[UI_RENDER_LINE_MAX];
+    snprintf(noteLine, sizeof(noteLine), "%-*.*s", contentW, contentW, note);
+    uiDrawText(y + 3, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB, noteLine);
+  }
+
+  int cursorOffset = hasInput ? clampInt((int)currentLen - scrollStart, 0, textW)
+                              : 0;
+  uiSetCursor(y + 2, x + 4 + cursorOffset);
 }
 
 static void uiDrawHelp(int rows, int cols) {
-  int w = cols > 100 ? 82 : cols - 8;
-  int h = 17;
-  int x = (cols - w) / 2;
-  int y = (rows - h) / 2;
-  int panelR = 24, panelG = 29, panelB = 36;
+  const UiTheme *theme = &UI_THEME_HELP;
+  int w = cols - 6;
+  if (w > 84)
+    w = 84;
+  if (w < 46)
+    w = cols - 4;
+  int h = rows >= 20 ? 15 : 13;
+  if (h > rows - 2)
+    h = rows - 2;
+  int x = ((cols - w) / 2) + 1;
+  int y = ((rows - h) / 2) + 1;
 
-  uiDrawBox(x, y, w, h, "Help");
-  uiDrawSectionLabel(y + 2, x + 2, w - 4, "ROOMS", NULL);
-  uiDrawText(y + 3, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/rooms   /create <room>   /create <room> -p <secret>");
-  uiDrawText(y + 4, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/enter <room>   /leave");
-  uiDrawSectionLabel(y + 6, x + 2, w - 4, "DIRECT MESSAGES", NULL);
-  uiDrawText(y + 7, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/dm <token|nick|prefix>   /dmleave   /list   /nick <target> <name>");
-  uiDrawSectionLabel(y + 9, x + 2, w - 4, "IDENTITY", NULL);
-  uiDrawText(y + 10, x + 2, 233, 237, 243, panelR, panelG, panelB,
-             "/name <name>   /token   /help   /exit");
-  uiDrawSectionLabel(y + 12, x + 2, w - 4, "KEYS", NULL);
-  uiDrawText(y + 13, x + 2, 166, 191, 255, panelR, panelG, panelB,
-             "Enter sends or submits   Up/Down scroll   PgUp/PgDn jump   ? toggles help");
-  uiDrawText(y + 15, x + 2, 127, 140, 156, panelR, panelG, panelB,
-             "Protected rooms and DMs stay encrypted on the client. TLS fingerprints are pinned on first use.");
+  uiDrawBox(x, y, w, h, "Quick Help", theme);
+  uiDrawSectionLabel(y + 2, x + 2, w - 4, "ROOMS", NULL, theme);
+  uiDrawText(y + 3, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
+             theme->panelB, "/rooms   /create <room>   /create <room> -p <secret>");
+  uiDrawText(y + 4, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
+             theme->panelB, "/enter <room>   /leave");
+  uiDrawSectionLabel(y + 6, x + 2, w - 4, "DIRECT", NULL, theme);
+  uiDrawText(y + 7, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
+             theme->panelB, "/dm <token|nick|prefix>   /dmleave   /list");
+  uiDrawText(y + 8, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
+             theme->panelB, "/nick <target> <name>   /token");
+  uiDrawSectionLabel(y + 10, x + 2, w - 4, "BASICS", NULL, theme);
+  uiDrawText(y + 11, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
+             theme->panelB, "/name <name>   /help   /exit");
+  if (h >= 15) {
+    uiDrawText(y + 12, x + 2, theme->accentR, theme->accentG, theme->accentB,
+               theme->panelR, theme->panelG, theme->panelB,
+               "Enter sends. Up/Down scroll. PgUp/PgDn jumps. ? toggles this panel.");
+    uiDrawText(y + 13, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB,
+               "Protected rooms and DMs stay encrypted on the client.");
+  } else {
+    uiDrawText(y + 12, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
+               theme->panelR, theme->panelG, theme->panelB,
+               "Enter sends. Up/Down scroll. ? closes help.");
+  }
 }
 
 static void renderUi(void) {
   int rows, cols;
   uiGetSize(&rows, &cols);
-  if (rows < 14 || cols < 60) {
+  print(UI_HIDE_CURSOR);
+  g_cursorVisible = false;
+
+  if (rows < 12 || cols < 52) {
     uiClearScreen();
     uiFillLine(1, cols, 18, 23, 30);
     uiFillLine(2, cols, 22, 27, 34);
     uiDrawText(1, 2, 233, 237, 243, 18, 23, 30, "SocketChat");
     uiDrawText(2, 2, 127, 140, 156, 22, 27, 34,
-               "Resize to at least 60x14 for the compact layout.");
+               "Resize to at least 52x12 for the compact layout.");
     fflush(stdout);
     return;
   }
 
-  bool compact = rows < 20 || cols < 82;
+  bool showSidebar = cols >= 106 && rows >= 21;
+  bool compact = !showSidebar;
   int topH = compact ? 1 : 2;
-  int inputH = compact ? 4 : 5;
-  int sidebar = compact ? 0 : (cols >= 120 ? SIDEBAR_WIDTH + 2 : SIDEBAR_WIDTH);
+  int inputH = rows >= 21 ? 5 : 4;
+  int sidebar = showSidebar ? clampInt(cols / 3, 30, 36) : 0;
   int messageW = compact ? cols - 1 : cols - sidebar - 3;
   int messageH = rows - topH - inputH;
   int messageY = topH + 1;
   int inputY = rows - inputH + 1;
   int connected = g_input.connected ? 1 : 0;
+  const UiTheme *activityTheme = &UI_THEME_ACTIVITY;
+  const UiTheme *navTheme = &UI_THEME_NAV;
+  const UiTheme *inputTheme = &UI_THEME_INPUT;
 
   uiClearScreen();
   uiFillLine(1, cols, 18, 23, 30);
   if (!compact)
-    uiFillLine(2, cols, 22, 27, 34);
+    uiFillLine(2, cols, 21, 25, 31);
 
   char context[64];
   char security[64];
@@ -1117,27 +1208,29 @@ static void renderUi(void) {
     char compactStatus[160];
     snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s | ? help",
              connected ? "connected" : "offline", context, security);
-    uiDrawText(1, 15, 152, 195, 121, 18, 23, 30, compactStatus);
+    uiDrawText(1, 15,
+               connected ? 152 : 239, connected ? 195 : 108,
+               connected ? 121 : 96, 18, 23, 30, compactStatus);
     uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
 
-    uiDrawBox(1, messageY, messageW, messageH, "Activity");
-    uiDrawBox(1, inputY, cols - 1, inputH, "Composer");
+    uiDrawBox(1, messageY, messageW, messageH, "Activity", activityTheme);
+    uiDrawBox(1, inputY, cols - 1, inputH, "Composer", inputTheme);
     uiDrawMessages(1, messageY, messageW, messageH);
   } else {
-    uiDrawText(1, 15, 152, 195, 121, 18, 23, 30, context);
-    uiDrawText(1, 34, 233, 196, 106, 18, 23, 30, security);
+    uiDrawText(1, 15, navTheme->accentR, navTheme->accentG, navTheme->accentB,
+               18, 23, 30, context);
+    uiDrawText(1, 36, inputTheme->accentR, inputTheme->accentG,
+               inputTheme->accentB, 18, 23, 30, security);
     uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
 
     char statusLine[256];
-    snprintf(statusLine, sizeof(statusLine),
-             "%s | relay %s | %d msgs | %d rooms | %d dms | ? help",
-             connected ? "connected" : "offline", g_serverLabel, g_messageCount,
-             g_roomCount, g_dmCount);
-    uiDrawText(2, 2, 127, 140, 156, 22, 27, 34, statusLine);
+    snprintf(statusLine, sizeof(statusLine), "%s | relay %s | ? help",
+             connected ? "connected" : "offline", g_serverLabel);
+    uiDrawText(2, 2, 127, 140, 156, 21, 25, 31, statusLine);
 
-    uiDrawBox(1, messageY, messageW, messageH, "Activity");
-    uiDrawBox(messageW + 2, messageY, sidebar, messageH, "Navigator");
-    uiDrawBox(1, inputY, cols - 1, inputH, "Composer");
+    uiDrawBox(1, messageY, messageW, messageH, "Activity", activityTheme);
+    uiDrawBox(messageW + 2, messageY, sidebar, messageH, "Navigator", navTheme);
+    uiDrawBox(1, inputY, cols - 1, inputH, "Composer", inputTheme);
     uiDrawMessages(1, messageY, messageW, messageH);
     uiDrawSidebar(messageW + 2, messageY, sidebar, messageH);
   }
@@ -1152,13 +1245,25 @@ static void renderUi(void) {
     totalLines += (wrappedCount > 0) ? wrappedCount : 1;
   }
   int maxScroll = totalLines > (messageH - 2) ? totalLines - (messageH - 2) : 0;
-  char scrollText[64];
-  snprintf(scrollText, sizeof(scrollText), "scroll %d/%d", g_messageScroll,
-           maxScroll);
-  uiDrawTextRight(messageY, messageW - 1, 127, 140, 156, 24, 29, 36, scrollText);
+  if (maxScroll > 0) {
+    char scrollText[64];
+    snprintf(scrollText, sizeof(scrollText), "scroll %d/%d", g_messageScroll,
+             maxScroll);
+    uiDrawTextRight(messageY, messageW - 1, activityTheme->mutedR,
+                    activityTheme->mutedG, activityTheme->mutedB,
+                    activityTheme->panelR, activityTheme->panelG,
+                    activityTheme->panelB, scrollText);
+  }
 
   if (g_showHelp)
     uiDrawHelp(rows, cols);
+
+  if (g_showHelp) {
+    g_cursorVisible = false;
+  } else if (g_cursorVisible) {
+    uiMove(clampInt(g_cursorRow, 1, rows), clampInt(g_cursorCol, 1, cols));
+    print(UI_SHOW_CURSOR);
+  }
 
   fflush(stdout);
 }
