@@ -90,6 +90,8 @@ cd Client
 ./run_tui.sh 192.168.1.100:2077
 ```
 
+For an isolated throwaway identity, append `-test` to either client script.
+
 ## Dependency Bootstrap
 
 The `run.sh` scripts now check for:

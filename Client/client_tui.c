@@ -22,7 +22,8 @@
 #define DEFAULT_IP "127.0.0.1"
 #define DEFAULT_PORT 2077
 #define MAX_MESSAGES 1000
-#define SIDEBAR_WIDTH 34
+#define SIDEBAR_MIN_WIDTH 28
+#define SIDEBAR_MAX_WIDTH 36
 #define UI_RENDER_LINES 256
 #define UI_RENDER_LINE_MAX 512
 
@@ -223,6 +224,111 @@ static int clampInt(int value, int minValue, int maxValue) {
   if (value > maxValue)
     return maxValue;
   return value;
+}
+
+static void uiCopyFittedText(const char *text, int width, char *out,
+                             size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  out[0] = '\0';
+  if (width <= 0)
+    return;
+
+  if (!text)
+    text = "";
+
+  if ((int)strlen(text) <= width) {
+    snprintf(out, outSize, "%-*.*s", width, width, text);
+    return;
+  }
+
+  if (width <= 3) {
+    snprintf(out, outSize, "%.*s", width, "...");
+    return;
+  }
+
+  snprintf(out, outSize, "%.*s...", width - 3, text);
+}
+
+static void uiDrawTextFitted(int row, int col, int width, int fgR, int fgG,
+                             int fgB, int bgR, int bgG, int bgB,
+                             const char *text) {
+  char fitted[UI_RENDER_LINE_MAX];
+  uiCopyFittedText(text, width, fitted, sizeof(fitted));
+  uiDrawText(row, col, fgR, fgG, fgB, bgR, bgG, bgB, fitted);
+}
+
+static void uiFormatKeyValueLine(const char *key, const char *value, int width,
+                                 char *out, size_t outSize) {
+  char raw[256];
+  snprintf(raw, sizeof(raw), "%-5s %s", key ? key : "", value ? value : "");
+  uiCopyFittedText(raw, width, out, outSize);
+}
+
+static void uiFormatRoomLine(char marker, const char *roomName,
+                             const char *roomType, int width, char *out,
+                             size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  out[0] = '\0';
+  if (width <= 0)
+    return;
+
+  int tagLen = roomType ? (int)strlen(roomType) : 0;
+  int nameWidth = width - 4 - tagLen;
+  if (nameWidth < 6) {
+    char raw[128];
+    snprintf(raw, sizeof(raw), "%c %s %s", marker, roomName ? roomName : "",
+             roomType ? roomType : "");
+    uiCopyFittedText(raw, width, out, outSize);
+    return;
+  }
+
+  char nameText[128];
+  uiCopyFittedText(roomName ? roomName : "", nameWidth, nameText,
+                   sizeof(nameText));
+  snprintf(out, outSize, "%c %s %s", marker, nameText, roomType ? roomType : "");
+}
+
+static void uiFormatContactLine(const DmContact *contact, int index, bool active,
+                                int width, char *out, size_t outSize) {
+  if (!out || outSize == 0)
+    return;
+
+  out[0] = '\0';
+  if (width <= 0 || !contact)
+    return;
+
+  char prefix[16];
+  int prefixLen =
+      snprintf(prefix, sizeof(prefix), "%c %2d ", active ? '>' : ' ', index);
+  if (prefixLen < 0)
+    prefixLen = 0;
+
+  if (contact->nickname[0]) {
+    char tokenHint[8];
+    snprintf(tokenHint, sizeof(tokenHint), "%.6s", contact->token);
+    int tokenWidth = (int)strlen(tokenHint);
+    int nameWidth = width - prefixLen - tokenWidth - 1;
+    if (nameWidth < 6) {
+      char raw[128];
+      snprintf(raw, sizeof(raw), "%s%s", prefix, contact->nickname);
+      uiCopyFittedText(raw, width, out, outSize);
+      return;
+    }
+
+    char nameText[128];
+    uiCopyFittedText(contact->nickname, nameWidth, nameText, sizeof(nameText));
+    snprintf(out, outSize, "%s%s %s", prefix, nameText, tokenHint);
+    return;
+  }
+
+  char tokenText[128];
+  uiCopyFittedText(contact->token, width - prefixLen, tokenText,
+                   sizeof(tokenText));
+  snprintf(out, outSize, "%s%s", prefix, tokenText);
 }
 
 static void uiDrawSectionLabel(int row, int col, int width, const char *title,
@@ -1017,25 +1123,26 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   uiDrawSectionLabel(row++, x + 2, contentW, "SESSION", NULL, theme);
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "you    %s", g_username);
+    uiFormatKeyValueLine("you", g_username, contentW, line, sizeof(line));
     uiDrawText(row++, x + 2, 223, 228, 231, theme->panelR, theme->panelG,
                theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "space  %s", context);
+    uiFormatKeyValueLine("space", context, contentW, line, sizeof(line));
     uiDrawText(row++, x + 2, 223, 228, 231, theme->panelR, theme->panelG,
                theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "lock   %s", security);
+    uiFormatKeyValueLine("lock", security, contentW, line, sizeof(line));
     uiDrawText(row++, x + 2, theme->accentR, theme->accentG, theme->accentB,
                theme->panelR, theme->panelG, theme->panelB, line);
   }
   if (row < endRow) {
     char line[128];
-    snprintf(line, sizeof(line), "relay  %.20s", g_serverLabel);
+    uiFormatKeyValueLine("relay", g_input.connected ? g_serverLabel : "offline",
+                         contentW, line, sizeof(line));
     uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
                theme->panelR, theme->panelG, theme->panelB, line);
   }
@@ -1047,18 +1154,22 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   snprintf(roomsCount, sizeof(roomsCount), "(%d)", g_roomCount);
   if (row < endRow)
     uiDrawSectionLabel(row++, x + 2, contentW, "ROOMS", roomsCount, theme);
-  if (g_roomCount == 0 && row < endRow) {
-    uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
-               theme->panelR, theme->panelG, theme->panelB,
-               "No rooms cached yet");
+  if (g_roomsLoading && row < endRow) {
+    uiDrawTextFitted(row++, x + 2, contentW, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB, "Refreshing room list...");
+  } else if (g_roomCount == 0 && row < endRow) {
+    uiDrawTextFitted(row++, x + 2, contentW, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB, "No rooms cached yet");
   }
   for (int i = 0; i < g_roomCount && row < endRow; i++) {
     char line[128];
     const char marker =
         strcmp(g_rooms[i], g_room.currentName) == 0 ? '>' : ' ';
-    const char *roomType =
-        strcmp(g_roomTypes[i], "PROTECTED") == 0 ? "locked" : "open";
-    snprintf(line, sizeof(line), "%c %-14.14s %-6s", marker, g_rooms[i], roomType);
+    const char *roomType = strcmp(g_roomTypes[i], "PROTECTED") == 0 ? "e2e" : "open";
+    uiFormatRoomLine(marker, g_rooms[i], roomType, contentW, line,
+                     sizeof(line));
     uiDrawText(row++, x + 2,
                marker == '>' ? 246 : 223, marker == '>' ? 214 : 228,
                marker == '>' ? 133 : 231, theme->panelR, theme->panelG,
@@ -1073,24 +1184,18 @@ static void uiDrawSidebar(int x, int y, int w, int h) {
   if (row < endRow)
     uiDrawSectionLabel(row++, x + 2, contentW, "DIRECT", dmCountText, theme);
   if (dmContactCount() == 0 && row < endRow) {
-    uiDrawText(row++, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
-               theme->panelR, theme->panelG, theme->panelB,
-               "No DM history yet");
+    uiDrawTextFitted(row++, x + 2, contentW, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB, "No DM history yet");
   }
   for (int i = 0; i < dmContactCount() && row < endRow; i++) {
     const DmContact *contact = contactsGet(&g_contacts, (size_t)i);
     if (!contact)
       continue;
     char line[128];
-    if (contact->nickname[0]) {
-      snprintf(line, sizeof(line), "%c %2d %-12.12s %.6s",
-               strcmp(contact->token, g_dm.peerToken) == 0 ? '>' : ' ', i + 1,
-               contact->nickname, contact->token);
-    } else {
-      snprintf(line, sizeof(line), "%c %2d %.16s",
-               strcmp(contact->token, g_dm.peerToken) == 0 ? '>' : ' ', i + 1,
-               contact->token);
-    }
+    uiFormatContactLine(contact, i + 1,
+                        strcmp(contact->token, g_dm.peerToken) == 0, contentW,
+                        line, sizeof(line));
     uiDrawText(row++, x + 2,
                strcmp(contact->token, g_dm.peerToken) == 0 ? 144 : 223,
                strcmp(contact->token, g_dm.peerToken) == 0 ? 224 : 228,
@@ -1112,31 +1217,39 @@ static void uiDrawInput(int x, int y, int w, int h) {
   char prompt[96];
   char note[160];
   char meta[64];
+  bool tight = contentW < 52;
   if (g_input.readingRoomSecret) {
     snprintf(prompt, sizeof(prompt), "secret for #%s",
              g_room.pendingName[0] ? g_room.pendingName : "room");
     snprintf(meta, sizeof(meta), "verifier only");
-    snprintf(note, sizeof(note),
-             "Local masking stays on while you type.");
+    snprintf(note, sizeof(note), "%s",
+             tight ? "Masked locally while you type."
+                   : "Local masking stays on while you type.");
   } else if (g_dm.active) {
     char dmLabel[64];
     formatDmLabel(g_dm.peerToken, dmLabel, sizeof(dmLabel));
     snprintf(prompt, sizeof(prompt), "direct to %s", dmLabel);
     snprintf(meta, sizeof(meta), "dm e2e");
-    snprintf(note, sizeof(note), "Handshake is live. /dmleave exits the session.");
+    snprintf(note, sizeof(note), "%s",
+             tight ? "/dmleave closes this session."
+                   : "Handshake is live. /dmleave exits the session.");
   } else if (g_room.active) {
     snprintf(prompt, sizeof(prompt), "room #%s", g_room.currentName);
     snprintf(meta, sizeof(meta), "%s",
              g_room.protectedRoom ? "room e2e" : "relay-visible");
     snprintf(note, sizeof(note), "%s",
              g_room.protectedRoom
-                 ? "Messages encrypt before they leave this terminal."
-                 : "This room is not end-to-end encrypted.");
+                 ? (tight ? "Encrypted before send."
+                          : "Messages encrypt before they leave this terminal.")
+                 : (tight ? "Room traffic is relay-visible."
+                          : "This room is not end-to-end encrypted."));
   } else {
     snprintf(prompt, sizeof(prompt), "lobby");
     snprintf(meta, sizeof(meta), "commands");
     snprintf(note, sizeof(note),
-             "Use /search, /rooms, /enter, /create, /dm, or /help.");
+             "%s",
+             tight ? "/rooms /enter /create /dm /help"
+                   : "Use /search, /rooms, /enter, /create, /dm, or /help.");
   }
 
   char countText[32];
@@ -1145,8 +1258,12 @@ static void uiDrawInput(int x, int y, int w, int h) {
   snprintf(countText, sizeof(countText), "%s  %zu/%d", meta, currentLen,
            MSG_SIZE - 1);
 
+  int promptWidth = contentW;
+  int countWidth = (int)strlen(countText);
+  if (countWidth + 3 < contentW)
+    promptWidth = contentW - countWidth - 2;
   char promptLine[UI_RENDER_LINE_MAX];
-  snprintf(promptLine, sizeof(promptLine), "%-*.*s", contentW, contentW, prompt);
+  uiCopyFittedText(prompt, promptWidth, promptLine, sizeof(promptLine));
   uiDrawText(y + 1, x + 2, theme->accentR, theme->accentG, theme->accentB,
              theme->panelR, theme->panelG, theme->panelB, promptLine);
   uiDrawTextRight(y + 1, x + w - 3, theme->mutedR, theme->mutedG,
@@ -1167,7 +1284,8 @@ static void uiDrawInput(int x, int y, int w, int h) {
   bool hasInput = currentLen > 0;
   const char *placeholder = g_input.readingRoomSecret
                                 ? ""
-                                : "Type a message or command";
+                                : (tight ? "Type message or command"
+                                         : "Type a message or command");
   int scrollStart = 0;
   if (hasInput && (int)currentLen > textW)
     scrollStart = (int)currentLen - textW;
@@ -1190,10 +1308,9 @@ static void uiDrawInput(int x, int y, int w, int h) {
              theme->panelR, theme->panelG, theme->panelB, inputLine);
 
   if (h >= 5) {
-    char noteLine[UI_RENDER_LINE_MAX];
-    snprintf(noteLine, sizeof(noteLine), "%-*.*s", contentW, contentW, note);
-    uiDrawText(y + 3, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
-               theme->panelR, theme->panelG, theme->panelB, noteLine);
+    uiDrawTextFitted(y + 3, x + 2, contentW, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB, note);
   }
 
   int cursorOffset = hasInput ? clampInt((int)currentLen - scrollStart, 0, textW)
@@ -1216,29 +1333,35 @@ static void uiDrawHelp(int rows, int cols) {
 
   uiDrawBox(x, y, w, h, "Quick Help", theme);
   uiDrawSectionLabel(y + 2, x + 2, w - 4, "ROOMS", NULL, theme);
-  uiDrawText(y + 3, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/rooms   /create <room>   /create <room> -p <secret>");
-  uiDrawText(y + 4, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/enter <room>   /leave");
+  uiDrawTextFitted(y + 3, x + 2, w - 4, 233, 237, 243, theme->panelR,
+                   theme->panelG, theme->panelB,
+                   "/rooms   /create <room>   /create <room> -p <secret>");
+  uiDrawTextFitted(y + 4, x + 2, w - 4, 233, 237, 243, theme->panelR,
+                   theme->panelG, theme->panelB, "/enter <room>   /leave");
   uiDrawSectionLabel(y + 6, x + 2, w - 4, "DIRECT", NULL, theme);
-  uiDrawText(y + 7, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/dm <contact>   /dmleave   /list   /search <query>");
-  uiDrawText(y + 8, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/nick [@|contact] <name>   /nick <contact> -   /token");
+  uiDrawTextFitted(y + 7, x + 2, w - 4, 233, 237, 243, theme->panelR,
+                   theme->panelG, theme->panelB,
+                   "/dm <contact>   /dmleave   /list   /search <query>");
+  uiDrawTextFitted(y + 8, x + 2, w - 4, 233, 237, 243, theme->panelR,
+                   theme->panelG, theme->panelB,
+                   "/nick [@|contact] <name>   /nick <contact> -   /token");
   uiDrawSectionLabel(y + 10, x + 2, w - 4, "BASICS", NULL, theme);
-  uiDrawText(y + 11, x + 2, 233, 237, 243, theme->panelR, theme->panelG,
-             theme->panelB, "/name <name>   /help   /exit");
+  uiDrawTextFitted(y + 11, x + 2, w - 4, 233, 237, 243, theme->panelR,
+                   theme->panelG, theme->panelB,
+                   "/name <name>   /help   /exit");
   if (h >= 15) {
-    uiDrawText(y + 12, x + 2, theme->accentR, theme->accentG, theme->accentB,
-               theme->panelR, theme->panelG, theme->panelB,
-               "Enter sends. Up/Down scroll. PgUp/PgDn jumps. ? toggles this panel.");
-    uiDrawText(y + 13, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
-               theme->panelR, theme->panelG, theme->panelB,
-               "Protected rooms and DMs stay encrypted on the client.");
+    uiDrawTextFitted(y + 12, x + 2, w - 4, theme->accentR, theme->accentG,
+                     theme->accentB, theme->panelR, theme->panelG,
+                     theme->panelB,
+                     "Enter sends. Up/Down scroll. PgUp/PgDn jumps. ? toggles this panel.");
+    uiDrawTextFitted(y + 13, x + 2, w - 4, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB,
+                     "Protected rooms and DMs stay encrypted on the client.");
   } else {
-    uiDrawText(y + 12, x + 2, theme->mutedR, theme->mutedG, theme->mutedB,
-               theme->panelR, theme->panelG, theme->panelB,
-               "Enter sends. Up/Down scroll. ? closes help.");
+    uiDrawTextFitted(y + 12, x + 2, w - 4, theme->mutedR, theme->mutedG,
+                     theme->mutedB, theme->panelR, theme->panelG,
+                     theme->panelB, "Enter sends. Up/Down scroll. ? closes help.");
   }
 }
 
@@ -1259,11 +1382,12 @@ static void renderUi(void) {
     return;
   }
 
-  bool showSidebar = cols >= 106 && rows >= 21;
+  bool showSidebar = cols >= 96 && rows >= 18;
   bool compact = !showSidebar;
   int topH = compact ? 1 : 2;
   int inputH = rows >= 21 ? 5 : 4;
-  int sidebar = showSidebar ? clampInt(cols / 3, 30, 36) : 0;
+  int sidebar =
+      showSidebar ? clampInt(cols / 3, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH) : 0;
   int messageW = compact ? cols - 1 : cols - sidebar - 3;
   int messageH = rows - topH - inputH;
   int messageY = topH + 1;
@@ -1290,12 +1414,19 @@ static void renderUi(void) {
 
   if (compact) {
     char compactStatus[160];
-    snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s | ? help",
-             connected ? "connected" : "offline", context, security);
-    uiDrawText(1, 15,
-               connected ? 152 : 239, connected ? 195 : 108,
-               connected ? 121 : 96, 18, 23, 30, compactStatus);
-    uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
+    snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s%s | ? help",
+             connected ? "connected" : "offline", context, security,
+             g_roomsLoading ? " | syncing rooms" : "");
+    bool showIdentity = cols >= 74;
+    int statusWidth = cols - 16;
+    if (showIdentity)
+      statusWidth -= (int)strlen(identityText) + 2;
+    uiDrawTextFitted(1, 15, statusWidth,
+                     connected ? 152 : 239, connected ? 195 : 108,
+                     connected ? 121 : 96, 18, 23, 30, compactStatus);
+    if (showIdentity) {
+      uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
+    }
 
     uiDrawBox(1, messageY, messageW, messageH, "Activity", activityTheme);
     uiDrawBox(1, inputY, cols - 1, inputH, "Composer", inputTheme);
@@ -1308,9 +1439,11 @@ static void renderUi(void) {
     uiDrawTextRight(1, cols - 2, 127, 140, 156, 18, 23, 30, identityText);
 
     char statusLine[256];
-    snprintf(statusLine, sizeof(statusLine), "%s | relay %s | ? help",
-             connected ? "connected" : "offline", g_serverLabel);
-    uiDrawText(2, 2, 127, 140, 156, 21, 25, 31, statusLine);
+    snprintf(statusLine, sizeof(statusLine),
+             "%s | relay %s | rooms %d | direct %d%s | ? help",
+             connected ? "connected" : "offline", g_serverLabel, g_roomCount,
+             dmContactCount(), g_roomsLoading ? " | syncing" : "");
+    uiDrawTextFitted(2, 2, cols - 3, 127, 140, 156, 21, 25, 31, statusLine);
 
     uiDrawBox(1, messageY, messageW, messageH, "Activity", activityTheme);
     uiDrawBox(messageW + 2, messageY, sidebar, messageH, "Navigator", navTheme);

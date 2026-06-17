@@ -6,7 +6,24 @@ cd "$(dirname "$0")"
 
 ensure_build_prereqs
 
-TARGET=${1:-}
+TARGET=""
+TEST_MODE=0
+
+for arg in "$@"; do
+    case "$arg" in
+        -test)
+            TEST_MODE=1
+            ;;
+        *)
+            if [ -z "$TARGET" ]; then
+                TARGET="$arg"
+            else
+                echo "Usage: ./run_tui.sh [host:port] [-test]" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
 
 echo "Building TUI client..."
 "$BUILD_CC" client_tui.c \
@@ -25,8 +42,19 @@ echo "Building TUI client..."
     -lpthread \
     -Wall -Wextra -O2
 
-if [ $? -eq 0 ]; then
-    echo "Build successful!"
+echo "Build successful!"
+
+if [ "$TEST_MODE" -eq 1 ]; then
+    TEST_DIR=$(mktemp -d)
+    mkdir -p "$TEST_DIR/.socketchat"
+    echo "Running TUI in TEST mode (temp identity: $TEST_DIR)..."
+    if [ -n "$TARGET" ]; then
+        HOME="$TEST_DIR" ./client_tui "$TARGET"
+    else
+        HOME="$TEST_DIR" ./client_tui
+    fi
+    rm -rf "$TEST_DIR"
+else
     if [ -n "$TARGET" ]; then
         echo "Connecting to $TARGET..."
         ./client_tui "$TARGET"
@@ -34,7 +62,4 @@ if [ $? -eq 0 ]; then
         echo "Running client (connecting to 127.0.0.1:2077)..."
         ./client_tui
     fi
-else
-    echo "Build failed!"
-    exit 1
 fi
