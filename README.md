@@ -135,6 +135,26 @@ pkg-config --cflags --libs openssl
 
 If you want to compile manually, use the same OpenSSL flags plus `-lpthread`.
 
+On macOS, ChatSocket uses the system C toolchain plus Homebrew's `pkg-config`
+and `openssl@3`. If the Apple command line tools are missing, install them
+with:
+
+```bash
+xcode-select --install
+```
+
+## Smoke Test
+
+There is a basic end-to-end CLI smoke test for local regression checking:
+
+```bash
+./tests/smoke_cli.sh
+```
+
+It recompiles the server and CLI client, starts a local relay, connects two
+test users, exercises room chat, DM handshakes, `/nick`, `/list`, `/search`,
+and reopening a DM by contact number.
+
 ## Local State
 
 Client state is stored under `~/.socketchat/` by default.

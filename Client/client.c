@@ -155,6 +155,17 @@ static int dmContactCount(void) {
   return (int)g_contacts.count;
 }
 
+static bool isNumericReference(const char *text) {
+  if (!text || !text[0])
+    return false;
+
+  for (size_t i = 0; text[i]; i++) {
+    if (!isdigit((unsigned char)text[i]))
+      return false;
+  }
+  return true;
+}
+
 static bool isTokenHex(const char *text) {
   if (!text || strlen(text) != TOKEN_HEX_LEN)
     return false;
@@ -935,10 +946,26 @@ static bool processInput(char *message) {
       return true;
     }
 
-    if (rest && rest[0]) {
+    if (!g_dm.active) {
+      if (!rest || !rest[0]) {
+        printMessage(COLOR_RED, "[!] ", "Usage: /nick <contact> <name>\n");
+        return true;
+      }
+
+      char nick[MAX_NAME_LEN];
+      copyTrimmed(rest, nick, sizeof(nick));
+      if (!nick[0]) {
+        printMessage(COLOR_RED, "[!] ", "Usage: /nick <contact> <name>\n");
+        return true;
+      }
+      handleNickCommand(first, nick);
+      return true;
+    }
+
+    if (rest && rest[0] &&
+        (isNumericReference(first) || isTokenHex(first))) {
       char probeToken[TOKEN_STR_SIZE];
-      if (!g_dm.active ||
-          resolveDmReference(first, probeToken, sizeof(probeToken), true, false)) {
+      if (resolveDmReference(first, probeToken, sizeof(probeToken), true, false)) {
         char nick[MAX_NAME_LEN];
         copyTrimmed(rest, nick, sizeof(nick));
         if (!nick[0]) {
@@ -950,21 +977,13 @@ static bool processInput(char *message) {
       }
     }
 
-    if (g_dm.active) {
-      char nick[MAX_NAME_LEN];
-      copyTrimmed(args, nick, sizeof(nick));
-      handleNickCommand("@", nick);
+    char nick[MAX_NAME_LEN];
+    copyTrimmed(args, nick, sizeof(nick));
+    if (!nick[0]) {
+      printMessage(COLOR_RED, "[!] ", "Usage: /nick [@|contact] <name>\n");
       return true;
     }
-
-    if (rest && rest[0]) {
-      char nick[MAX_NAME_LEN];
-      copyTrimmed(rest, nick, sizeof(nick));
-      handleNickCommand(first, nick);
-      return true;
-    }
-
-    printMessage(COLOR_RED, "[!] ", "Usage: /nick [@|contact] <name>\n");
+    handleNickCommand("@", nick);
     return true;
   }
   if (strcmp(message, "/clear") == 0) {

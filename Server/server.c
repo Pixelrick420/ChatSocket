@@ -22,6 +22,8 @@ typedef struct {
 static SslEntry g_sslMap[MAX_CLIENTS];
 static int g_sslCount = 0;
 static SSL_CTX *g_sslCtx = NULL;
+static pthread_mutex_t g_sslMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_sendMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static TokenEntry g_tokenMap[MAX_CLIENTS];
 static int g_tokenCount = 0;
@@ -119,13 +121,15 @@ static void setSocketTimeoutMs(SocketHandle socketFD, int timeoutMs) {
 }
 
 static bool sendFrame(SocketHandle socketFD, const char *message) {
-  pthread_mutex_lock(&g_context->mutex);
+  pthread_mutex_lock(&g_sslMutex);
   SSL *ssl = sslMapGet(socketFD);
-  pthread_mutex_unlock(&g_context->mutex);
+  pthread_mutex_unlock(&g_sslMutex);
 
-  if (ssl)
-    return tlsSend(ssl, message, strlen(message));
-  return send(socketFD, message, strlen(message), 0) >= 0;
+  pthread_mutex_lock(&g_sendMutex);
+  bool ok = ssl ? tlsSend(ssl, message, strlen(message))
+                : send(socketFD, message, strlen(message), 0) >= 0;
+  pthread_mutex_unlock(&g_sendMutex);
+  return ok;
 }
 
 static void sendError(SocketHandle socketFD, const char *message) {
@@ -141,9 +145,9 @@ static void sendOk(SocketHandle socketFD, const char *message) {
 }
 
 static ssize_t recvClient(SocketHandle socketFD, char *buf, size_t maxLen) {
-  pthread_mutex_lock(&g_context->mutex);
+  pthread_mutex_lock(&g_sslMutex);
   SSL *ssl = sslMapGet(socketFD);
-  pthread_mutex_unlock(&g_context->mutex);
+  pthread_mutex_unlock(&g_sslMutex);
 
   if (ssl)
     return tlsRecv(ssl, buf, maxLen);
@@ -601,8 +605,10 @@ disconnect:
   leaveCurrentRoom(client);
   pthread_mutex_lock(&g_context->mutex);
   tokenMapRemoveByFD(client->socketFD);
-  sslMapRemove(client->socketFD);
   pthread_mutex_unlock(&g_context->mutex);
+  pthread_mutex_lock(&g_sslMutex);
+  sslMapRemove(client->socketFD);
+  pthread_mutex_unlock(&g_sslMutex);
   removeClient(g_context, client->socketFD);
   platformCloseSocket(client->socketFD);
   free(client->address);
@@ -698,16 +704,16 @@ int main(void) {
       continue;
     }
 
-    pthread_mutex_lock(&g_context->mutex);
+    pthread_mutex_lock(&g_sslMutex);
     sslMapAdd(client->socketFD, ssl);
-    pthread_mutex_unlock(&g_context->mutex);
+    pthread_mutex_unlock(&g_sslMutex);
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, handleClient, client) != 0) {
       perror("pthread_create");
-      pthread_mutex_lock(&g_context->mutex);
+      pthread_mutex_lock(&g_sslMutex);
       sslMapRemove(client->socketFD);
-      pthread_mutex_unlock(&g_context->mutex);
+      pthread_mutex_unlock(&g_sslMutex);
       removeClient(g_context, client->socketFD);
       platformCloseSocket(client->socketFD);
       free(client->address);
