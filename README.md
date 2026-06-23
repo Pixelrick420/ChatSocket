@@ -6,14 +6,14 @@ ChatSocket is a multi-room chat application written in C for macOS and Linux. It
 - a raw CLI client
 - a modern full-screen terminal UI client
 
-This version is a breaking protocol redesign focused on stronger end-to-end security, better portability across Unix-like systems, and cleaner local bootstrapping.
+This app is designed with focus on end-to-end security, portability across Unix-like systems, and clean local bootstrapping.
 
 ## Highlights
 
-- Protected rooms are now truly end-to-end encrypted against the server.
+- Protected rooms are end-to-end encrypted against the server.
 - Room access verification and room encryption keys are derived separately.
 - Direct messages use a signed ephemeral X25519 handshake and AES-256-GCM.
-- The old `ncurses` TUI has been replaced with a custom terminal renderer.
+- The TUI is done through custom terminal renderer.
 - The `run.sh` scripts can bootstrap build dependencies on macOS and common Linux distros.
 - Clients pin the server certificate fingerprint on first successful connection.
 
@@ -21,7 +21,7 @@ This version is a breaking protocol redesign focused on stronger end-to-end secu
 
 ### Protected rooms
 
-Protected rooms no longer send the room secret or a directly reusable room key derivative to the server.
+Protected rooms do not send the room secret or a directly reusable room key derivative to the server.
 
 - The client generates a random salt.
 - The server stores only a salted verifier.
@@ -39,20 +39,20 @@ DM sessions use:
 - HKDF-SHA256 for session key derivation
 - AES-256-GCM for message encryption
 
-This is stronger than the previous static shared-secret DM flow because session keys are no longer just permanent derivatives of the long-lived identity material.
+This is strong because session keys are not just permanent derivatives of the long-lived identity material.
 
 ### Transport
 
-The transport layer is still TLS, but clients now pin the server certificate fingerprint on first use.
+The transport layer is TLS, clients pin the server certificate fingerprint on first use.
 
 - First connection to `host:port`: the fingerprint is stored locally.
 - Later connections: the fingerprint must match.
 
-This is a trust-on-first-use model, not public CA validation.
+This is a trust-on-first-use model.
 
 ## TUI
 
-The new TUI is a custom full-screen terminal interface built directly on ANSI terminal control and raw input handling.
+The TUI is a custom full-screen terminal interface built directly on ANSI terminal control and raw input handling.
 
 - split conversation and sidebar layout
 - room list and DM list on the right
@@ -170,7 +170,7 @@ Client state is stored under `~/.socketchat/` by default.
 
 ## Limitations
 
-- This pass targets macOS and Linux. Windows support was intentionally deferred.
+- This targets macOS and Linux. Windows support was intentionally deferred.
 - The room protection model is still password-based, so weak shared secrets remain guessable offline if the verifier is stolen.
 - The TUI is intentionally lightweight and terminal-native; it is not using an external widget toolkit.
 
