@@ -103,26 +103,36 @@ install_macos_deps() {
 }
 
 ensure_build_prereqs() {
-  if [[ -f "$BOOTSTRAP_STAMP" ]] && ! need_install; then
+  if ! need_install; then
     select_compiler
     return
   fi
 
+  echo "Build dependencies are missing." >&2
+  echo "Review and run: $BOOTSTRAP_DIR/bootstrap.sh --install" >&2
+  return 1
+}
+
+install_build_prereqs() {
   echo "Checking build dependencies..."
-  if need_install; then
-    case "$(uname -s)" in
-      Darwin)
-        install_macos_deps
-        ;;
-      Linux)
-        install_linux_deps
-        ;;
-      *)
-        echo "Unsupported OS for automatic dependency installation." >&2
-        exit 1
-        ;;
-    esac
+  if ! need_install; then
+    select_compiler
+    touch "$BOOTSTRAP_STAMP"
+    return
   fi
+
+  case "$(uname -s)" in
+    Darwin)
+      install_macos_deps
+      ;;
+    Linux)
+      install_linux_deps
+      ;;
+    *)
+      echo "Unsupported OS for automatic dependency installation." >&2
+      exit 1
+      ;;
+  esac
 
   if need_install; then
     echo "Dependencies are still missing after the install attempt." >&2
@@ -132,3 +142,11 @@ ensure_build_prereqs() {
   select_compiler
   touch "$BOOTSTRAP_STAMP"
 }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ "${1:-}" != "--install" || "$#" -ne 1 ]]; then
+    echo "Usage: ./bootstrap.sh --install" >&2
+    exit 1
+  fi
+  install_build_prereqs
+fi

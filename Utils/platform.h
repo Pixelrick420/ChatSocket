@@ -43,5 +43,6 @@ bool platformLocalTime(time_t now, struct tm *outTm);
 bool platformGetHomeDir(char *out, size_t outSize);
 bool platformGetConfigDir(char *out, size_t outSize);
 bool platformEnsureDir(const char *path);
+bool platformSecureUserFileFd(int fd);
 char *platformStrDup(const char *src);
 int platformSocketErrno(void);

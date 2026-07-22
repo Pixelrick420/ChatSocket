@@ -6,3 +6,4 @@ Client/client_tui
 .bootstrap.*.stamp
 work/
 *.o
+build/

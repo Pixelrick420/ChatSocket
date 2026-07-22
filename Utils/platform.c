@@ -16,6 +16,9 @@ bool platformInit(void) {
 
   initialized = true;
 #endif
+#ifndef _WIN32
+  signal(SIGPIPE, SIG_IGN);
+#endif
   return true;
 }
 
@@ -124,11 +127,36 @@ bool platformEnsureDir(const char *path) {
   if (_mkdir(path) == 0 || errno == EEXIST)
     return true;
 #else
-  if (mkdir(path, 0700) == 0 || errno == EEXIST)
+  if (mkdir(path, 0700) == 0)
     return true;
+  if (errno == EEXIST) {
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != geteuid()) {
+      errno = EPERM;
+      return false;
+    }
+    if ((st.st_mode & 0777) != 0700 && chmod(path, 0700) != 0)
+      return false;
+    return true;
+  }
 #endif
 
   return false;
+}
+
+bool platformSecureUserFileFd(int fd) {
+#ifdef _WIN32
+  return fd >= 0;
+#else
+  struct stat st;
+  if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+      st.st_uid != geteuid()) {
+    errno = EPERM;
+    return false;
+  }
+  return fchmod(fd, 0600) == 0;
+#endif
 }
 
 char *platformStrDup(const char *src) {

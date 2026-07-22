@@ -16,9 +16,12 @@
 #include "platform.h"
 
 #define MSG_SIZE         2048
+#define MAX_MESSAGE_TEXT 1400
 #define PORT             2077
 #define MAX_NAME_LEN       64
 #define MAX_PASSWORD_LEN  256
+#define MAX_ROOM_TOPIC_LEN 256
+#define ROOM_OWNER_TOKEN_SIZE 65
 #define MAX_ROOM_MEMBERS   32
 #define ROOM_TIMEOUT     3600
 
@@ -34,6 +37,8 @@ typedef struct
 {
     char   name[MAX_NAME_LEN];
     char   password[MAX_PASSWORD_LEN];
+    char   topic[MAX_ROOM_TOPIC_LEN];
+    char   ownerToken[ROOM_OWNER_TOKEN_SIZE];
     bool   hasPassword;
     SocketHandle *members;
     int    memberCount;
@@ -48,6 +53,9 @@ typedef struct
     char           pendingRoomName[MAX_NAME_LEN];
     int            currentRoom;
     bool           waitingForRoomProof;
+    time_t         rateWindow;
+    unsigned int   framesInWindow;
+    unsigned int   dmInitsInWindow;
     bool           success;
     int            error;
 } Client;

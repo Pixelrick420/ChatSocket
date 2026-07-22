@@ -6,15 +6,18 @@ ChatSocket is a multi-room chat application written in C for macOS and Linux. It
 - a raw CLI client
 - a modern full-screen terminal UI client
 
-This version is a breaking protocol redesign focused on stronger end-to-end security, better portability across Unix-like systems, and cleaner local bootstrapping.
+Protocol v3 is a breaking redesign focused on stronger end-to-end security,
+bounded parsing, replay resistance, and testable operation.
 
 ## Highlights
 
 - Protected rooms are now truly end-to-end encrypted against the server.
 - Room access verification and room encryption keys are derived separately.
-- Direct messages use a signed ephemeral X25519 handshake and AES-256-GCM.
+- Direct messages use session-bound X25519, signed transcripts, AES-256-GCM
+  associated data, and monotonic replay counters.
+- Rooms expose authenticated member lists and owner-controlled topics.
 - The old `ncurses` TUI has been replaced with a custom terminal renderer.
-- The `run.sh` scripts can bootstrap build dependencies on macOS and common Linux distros.
+- Normal launch never invokes a package manager or `sudo`.
 - Clients pin the server certificate fingerprint on first successful connection.
 
 ## Security Model
@@ -23,7 +26,8 @@ This version is a breaking protocol redesign focused on stronger end-to-end secu
 
 Protected rooms no longer send the room secret or a directly reusable room key derivative to the server.
 
-- The client generates a random salt.
+- The client generates a random salt and derives keys with versioned scrypt
+  parameters (`SCRYPT-32768-8-1`).
 - The server stores only a salted verifier.
 - The room encryption key is derived locally from the room secret with a separate KDF context.
 - Room messages are encrypted client-side with AES-256-GCM.
@@ -38,6 +42,11 @@ DM sessions use:
 - signed ephemeral X25519 key exchange for session setup
 - HKDF-SHA256 for session key derivation
 - AES-256-GCM for message encryption
+- random session IDs bound into the signed handshake
+- sender, recipient, session, and sequence bound as AES-GCM associated data
+- strictly increasing receive counters to reject replay and reordering
+- explicit session close and busy rejection, preventing unsolicited handshakes
+  from replacing an active DM
 
 This is stronger than the previous static shared-secret DM flow because session keys are no longer just permanent derivatives of the long-lived identity material.
 
@@ -45,8 +54,9 @@ This is stronger than the previous static shared-secret DM flow because session 
 
 The transport layer is still TLS, but clients now pin the server certificate fingerprint on first use.
 
-- First connection to `host:port`: the fingerprint is stored locally.
+- First connection to `host:port`: the fingerprint is printed and stored locally.
 - Later connections: the fingerprint must match.
+- Pin-file access is locked and restricted to the current user.
 
 This is a trust-on-first-use model, not public CA validation.
 
@@ -100,7 +110,14 @@ The `run.sh` scripts now check for:
 - `pkg-config`
 - OpenSSL development headers/libraries
 
-If anything is missing, the scripts try to install the required packages:
+Normal launch stops with installation instructions when dependencies are
+missing. Review and explicitly run:
+
+```bash
+./bootstrap.sh --install
+```
+
+Supported installers:
 
 - macOS: Homebrew
 - Linux: `apt`, `dnf`, `yum`, `pacman`, or `zypper`
@@ -114,11 +131,15 @@ If your system uses another package manager, install the dependencies manually a
 - `/name <name>`: set your local display name and sync it to the server
 - `/rooms`: refresh the server room list
 - `/create <room>`: create an open room
-- `/create <room> -p <secret>`: create a protected room
+- `/create <room> -p`: create a protected room using a masked secret prompt
 - `/enter <room>`: enter a room
 - `/leave`: leave the current room
+- `/members`: list current room members with identity fingerprints
+- `/topic`: show current room topic
+- `/topic <text>`: set topic as room owner
+- `/topic -`: clear topic as room owner
 - `/dm <contact>`: start a DM by number, nickname, token prefix, or full token
-- `/dmleave`: close the active DM session
+- `/dmleave`: close the active DM session on both peers
 - `/list`: show your locally-known DM contacts in recent-first order
 - `/search <query>`: search contacts the way you would in a messaging app
 - `/nick [@|contact] <name>`: save a local nickname for the active DM or any contact
@@ -145,17 +166,23 @@ with:
 xcode-select --install
 ```
 
-## Smoke Test
+## Build and Test
 
 There is a basic end-to-end CLI smoke test for local regression checking:
 
 ```bash
-./tests/smoke_cli.sh
+make all
+make test
+make sanitize
 ```
 
 It recompiles the server and CLI client, starts a local relay, connects two
-test users, exercises room chat, DM handshakes, `/nick`, `/list`, `/search`,
-and reopening a DM by contact number.
+test users, exercises open and protected rooms, wrong-secret rejection,
+owner-only topics, member listing, protocol-v3 DM handshakes, encrypted DM
+traffic, contact search, and session reopening.
+
+The server also enforces unique case-insensitive display names, bounded frame
+sizes, 100 frames per second per connection, and five DM handshakes per second.
 
 ## Local State
 
@@ -168,10 +195,20 @@ Client state is stored under `~/.socketchat/` by default.
 - `server.crt` / `server.key`: server TLS material
 - `known_servers.tsv`: pinned TLS fingerprints by `host:port`
 
+DM history and diagnostic logs remain plaintext inside the user-only config
+directory. Disable either before launch when local retention is unwanted:
+
+```bash
+SOCKETCHAT_HISTORY=0 SOCKETCHAT_LOG=0 ./Client/run_tui.sh
+```
+
 ## Limitations
 
 - This pass targets macOS and Linux. Windows support was intentionally deferred.
 - The room protection model is still password-based, so weak shared secrets remain guessable offline if the verifier is stolen.
+- Protected-room content is confidential from the relay, but group sender
+  attribution and replay protection are not yet cryptographically bound.
+- Only one active DM session is supported per client UI.
 - The TUI is intentionally lightweight and terminal-native; it is not using an external widget toolkit.
 
 ## License

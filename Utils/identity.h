@@ -9,7 +9,6 @@
 #include <openssl/rand.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <openssl/sha.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,10 +47,6 @@ bool identityVerify(const char          *pubHex,
                     const unsigned char *msg,
                     size_t               msgLen,
                     const unsigned char  sig[SIG_BYTES]);
-bool identityEd25519PubToX25519(const unsigned char ed25519Pub[IDENTITY_KEY_BYTES],
-                                unsigned char       x25519Out[IDENTITY_KEY_BYTES]);
-bool identityEd25519PrivToX25519(const unsigned char ed25519Priv[IDENTITY_KEY_BYTES],
-                                 unsigned char       x25519Out[IDENTITY_KEY_BYTES]);
 void identityPrintToken(const Identity *id);
 bool identityLoadUsername(char *username, size_t maxLen);
 bool identitySaveUsername(const char *username);

@@ -153,7 +153,7 @@ Room *createRoom(const char *name, const char *password) {
   if (room->hasPassword)
     strncpy(room->password, password, MAX_PASSWORD_LEN - 1);
 
-  room->members = calloc(MAX_ROOM_MEMBERS, sizeof(int));
+  room->members = calloc(MAX_ROOM_MEMBERS, sizeof(SocketHandle));
   if (!room->members) {
     free(room);
     return NULL;
@@ -206,7 +206,14 @@ void cleanupInactiveRooms(ServerContext *context) {
     if (context->rooms[i]->memberCount == 0 &&
         difftime(now, context->rooms[i]->lastActivity) > ROOM_TIMEOUT) {
       destroyRoom(context->rooms[i]);
-      context->rooms[i] = context->rooms[--context->roomCount];
+      for (int j = i; j + 1 < context->roomCount; j++)
+        context->rooms[j] = context->rooms[j + 1];
+      context->rooms[--context->roomCount] = NULL;
+
+      for (size_t j = 0; j < context->clientCount; j++) {
+        if (context->clients[j]->currentRoom > i)
+          context->clients[j]->currentRoom--;
+      }
       i--;
     }
   }

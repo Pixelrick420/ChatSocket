@@ -1,6 +1,11 @@
 #include "aes.h"
 #include "tls.h"
 
+#ifndef _WIN32
+#include <sys/file.h>
+#include <unistd.h>
+#endif
+
 static void tlsPrintErrors(const char *context) {
   fprintf(stderr, "tls: %s\n", context);
   ERR_print_errors_fp(stderr);
@@ -67,6 +72,8 @@ static bool generateSelfSignedCert(const char *certPath, const char *keyPath) {
   EVP_PKEY *pkey = NULL;
   X509 *x509 = NULL;
   FILE *f = NULL;
+  bool keyCreated = false;
+  bool certCreated = false;
 
   EVP_PKEY_CTX *pkctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
   if (!pkctx) {
@@ -110,9 +117,18 @@ static bool generateSelfSignedCert(const char *certPath, const char *keyPath) {
   }
 
   {
-    int fd = open(keyPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(keyPath, flags, 0600);
     if (fd < 0) {
       perror("tls: open server.key");
+      goto out;
+    }
+    keyCreated = true;
+    if (!platformSecureUserFileFd(fd)) {
+      platformCloseFd(fd);
       goto out;
     }
     f = fdopen(fd, "w");
@@ -131,7 +147,25 @@ static bool generateSelfSignedCert(const char *certPath, const char *keyPath) {
     f = NULL;
   }
 
-  f = fopen(certPath, "w");
+  {
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(certPath, flags, 0600);
+    if (fd < 0) {
+      perror("tls: open server.crt");
+      goto out;
+    }
+    certCreated = true;
+    if (!platformSecureUserFileFd(fd)) {
+      platformCloseFd(fd);
+      goto out;
+    }
+    f = fdopen(fd, "w");
+    if (!f)
+      platformCloseFd(fd);
+  }
   if (!f) {
     perror("tls: open server.crt");
     goto out;
@@ -155,6 +189,28 @@ out:
     EVP_PKEY_free(pkey);
   if (pkctx)
     EVP_PKEY_CTX_free(pkctx);
+  if (!ok) {
+    if (certCreated)
+      remove(certPath);
+    if (keyCreated)
+      remove(keyPath);
+  }
+  return ok;
+}
+
+static bool validateTlsFile(const char *path) {
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
+  int fd = open(path, flags);
+  if (fd < 0)
+    return false;
+  bool ok = platformSecureUserFileFd(fd);
+  platformCloseFd(fd);
   return ok;
 }
 
@@ -169,6 +225,10 @@ SSL_CTX *tlsServerCtxCreate(void) {
   if (stat(certPath, &st) != 0 || stat(keyPath, &st) != 0) {
     if (!generateSelfSignedCert(certPath, keyPath))
       return NULL;
+  }
+  if (!validateTlsFile(certPath) || !validateTlsFile(keyPath)) {
+    fprintf(stderr, "tls: certificate files must be owned regular files\n");
+    return NULL;
   }
 
   const SSL_METHOD *method = TLS_server_method();
@@ -253,6 +313,11 @@ SSL *tlsClientConnect(SSL_CTX *ctx, SocketHandle fd) {
 bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
   if (!ssl || !serverLabel || !serverLabel[0])
     return false;
+  for (size_t i = 0; serverLabel[i]; i++) {
+    unsigned char ch = (unsigned char)serverLabel[i];
+    if (ch < 0x21 || ch == 0x7f)
+      return false;
+  }
 
   char fingerprint[SHA256_HEX_SIZE];
   if (!tlsPeerFingerprint(ssl, fingerprint))
@@ -262,30 +327,81 @@ bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
   if (!fingerprintPath(path, sizeof(path)))
     return false;
 
-  FILE *f = fopen(path, "r");
-  if (f) {
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-      size_t len = strlen(line);
-      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-        line[--len] = '\0';
-      char *tab = strchr(line, '\t');
-      if (!tab)
-        continue;
-      *tab++ = '\0';
-      if (strcmp(line, serverLabel) == 0) {
-        fclose(f);
-        return strcmp(tab, fingerprint) == 0;
+  int flags = O_RDWR | O_CREAT | O_APPEND;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
+  int fd = open(path, flags, 0600);
+  if (fd < 0)
+    return false;
+  if (!platformSecureUserFileFd(fd)) {
+    platformCloseFd(fd);
+    return false;
+  }
+
+#ifndef _WIN32
+  if (flock(fd, LOCK_EX) != 0) {
+    platformCloseFd(fd);
+    return false;
+  }
+#endif
+
+  FILE *f = fdopen(fd, "a+");
+  if (!f) {
+    platformCloseFd(fd);
+    return false;
+  }
+  rewind(f);
+
+  char line[256];
+  while (fgets(line, sizeof(line), f)) {
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+      line[--len] = '\0';
+    char *tab = strchr(line, '\t');
+    if (!tab)
+      continue;
+    *tab++ = '\0';
+    if (strcmp(line, serverLabel) != 0)
+      continue;
+
+    unsigned char storedDigest[SHA256_BYTES_SIZE];
+    bool validStoredPin = hexToBytes(tab, storedDigest, sizeof(storedDigest));
+    OPENSSL_cleanse(storedDigest, sizeof(storedDigest));
+    bool match = validStoredPin && strcmp(tab, fingerprint) == 0;
+    if (!match) {
+      if (validStoredPin) {
+        fprintf(stderr,
+                "tls: certificate pin mismatch for %s\n"
+                "tls: pinned   %s\n"
+                "tls: received %s\n",
+                serverLabel, tab, fingerprint);
+      } else {
+        fprintf(stderr, "tls: stored certificate pin is invalid for %s\n",
+                serverLabel);
       }
     }
     fclose(f);
+    return match;
   }
 
-  f = fopen(path, "a");
-  if (!f)
+  if (fprintf(f, "%s\t%s\n", serverLabel, fingerprint) < 0 ||
+      fflush(f) != 0) {
+    fclose(f);
     return false;
-  fprintf(f, "%s\t%s\n", serverLabel, fingerprint);
+  }
+#ifndef _WIN32
+  if (fsync(fd) != 0) {
+    fclose(f);
+    return false;
+  }
+#endif
   fclose(f);
+  fprintf(stderr, "tls: pinned first-use certificate for %s: %s\n", serverLabel,
+          fingerprint);
   return true;
 }
 
@@ -303,7 +419,7 @@ bool tlsSend(SSL *ssl, const void *buf, size_t len) {
 }
 
 ssize_t tlsRecv(SSL *ssl, char *buf, size_t maxLen) {
-  if (maxLen == 0)
+  if (maxLen < 2)
     return -1;
 
   size_t offset = 0;
@@ -329,6 +445,10 @@ ssize_t tlsRecv(SSL *ssl, char *buf, size_t maxLen) {
   }
 
   buf[offset] = '\0';
+  if (offset == maxLen - 1 && offset > 0 && buf[offset - 1] != '\n') {
+    fprintf(stderr, "tls: oversized frame rejected\n");
+    return -1;
+  }
   return offset == 0 ? 0 : (ssize_t)offset;
 }
 
