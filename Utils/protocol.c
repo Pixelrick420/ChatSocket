@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <inttypes.h>
 
 size_t protocolSplitFields(char *line, char **parts, size_t maxParts) {
   if (!line || !parts || maxParts == 0)
@@ -77,18 +78,120 @@ bool protocolParseSequence(const char *value, uint64_t *out) {
   return true;
 }
 
+bool protocolParsePort(const char *value, int *out) {
+  if (!value || !value[0] || !out)
+    return false;
+  for (size_t i = 0; value[i]; i++) {
+    if (!isdigit((unsigned char)value[i]))
+      return false;
+  }
+  errno = 0;
+  char *end = NULL;
+  long parsed = strtol(value, &end, 10);
+  if (errno != 0 || !end || *end != '\0' || parsed < 1 || parsed > 65535)
+    return false;
+  *out = (int)parsed;
+  return true;
+}
+
 bool protocolBuildAuthTranscript(const unsigned char *nonce, size_t nonceLen,
+                                 const char *certificateFingerprint,
                                  unsigned char *out, size_t outSize,
                                  size_t *outLen) {
-  static const unsigned char prefix[] = "socketchat-auth-v3|";
+  static const unsigned char prefix[] = "socketchat-auth-v4|";
   size_t prefixLen = sizeof(prefix) - 1;
-  if (!nonce || !out || !outLen || nonceLen > outSize ||
-      prefixLen > outSize - nonceLen)
+  size_t fingerprintLen =
+      certificateFingerprint ? strlen(certificateFingerprint) : 0;
+  if (!nonce || !certificateFingerprint || fingerprintLen != 64 || !out ||
+      !outLen || prefixLen >= outSize || nonceLen >= outSize - prefixLen ||
+      fingerprintLen > outSize - prefixLen - nonceLen - 1)
+    return false;
+
+  if (!protocolIsHex(certificateFingerprint, fingerprintLen))
     return false;
 
   memcpy(out, prefix, prefixLen);
   memcpy(out + prefixLen, nonce, nonceLen);
-  *outLen = prefixLen + nonceLen;
+  out[prefixLen + nonceLen] = '|';
+  memcpy(out + prefixLen + nonceLen + 1, certificateFingerprint,
+         fingerprintLen);
+  *outLen = prefixLen + nonceLen + 1 + fingerprintLen;
+  return true;
+}
+
+bool protocolBuildRoomAad(const char *roomName, const char *senderName,
+                          const char *senderToken, const char *sessionId,
+                          uint64_t sequence, char *out, size_t outSize,
+                          size_t *outLen) {
+  if (!roomName || !senderName || !senderToken || !sessionId || !out ||
+      !outLen || sequence == 0)
+    return false;
+  int written = snprintf(out, outSize, "socketchat-room-v4|%s|%s|%s|%s|%" PRIu64,
+                         roomName, senderName, senderToken, sessionId, sequence);
+  if (written <= 0 || (size_t)written >= outSize)
+    return false;
+  *outLen = (size_t)written;
+  return true;
+}
+
+bool protocolBuildRoomTranscript(const char *roomName, const char *senderName,
+                                 const char *senderToken,
+                                 const char *sessionId, uint64_t sequence,
+                                 const char *payload, char *out,
+                                 size_t outSize, size_t *outLen) {
+  size_t aadLen = 0;
+  if (!payload || !protocolBuildRoomAad(roomName, senderName, senderToken,
+                                        sessionId, sequence, out, outSize,
+                                        &aadLen) ||
+      aadLen + 1 >= outSize)
+    return false;
+  int written = snprintf(out + aadLen, outSize - aadLen, "|%s", payload);
+  if (written <= 0 || (size_t)written >= outSize - aadLen)
+    return false;
+  *outLen = aadLen + (size_t)written;
+  return true;
+}
+
+bool protocolAcceptRoomSequence(RoomReplayTracker *tracker,
+                                const char *senderToken,
+                                const char *sessionId, uint64_t sequence) {
+  if (!tracker || !protocolIsHex(senderToken, 64) ||
+      !protocolIsHex(sessionId, 32) || sequence == 0)
+    return false;
+
+  RoomReplayPeer *peer = NULL;
+  for (size_t i = 0; i < ROOM_REPLAY_PEERS; i++) {
+    if (strcmp(tracker->peers[i].token, senderToken) == 0) {
+      peer = &tracker->peers[i];
+      break;
+    }
+    if (!peer && !tracker->peers[i].token[0])
+      peer = &tracker->peers[i];
+  }
+  if (!peer)
+    return false;
+
+  if (strcmp(peer->token, senderToken) == 0 &&
+      strcmp(peer->sessionId, sessionId) == 0) {
+    if (peer->sequence == UINT64_MAX || sequence != peer->sequence + 1)
+      return false;
+    peer->sequence = sequence;
+    return true;
+  }
+
+  if (sequence != 1)
+    return false;
+  for (size_t i = 0; i < ROOM_REPLAY_SESSIONS; i++) {
+    if (strcmp(tracker->seenSessions[i], sessionId) == 0)
+      return false;
+  }
+
+  snprintf(peer->token, sizeof(peer->token), "%s", senderToken);
+  snprintf(peer->sessionId, sizeof(peer->sessionId), "%s", sessionId);
+  peer->sequence = sequence;
+  snprintf(tracker->seenSessions[tracker->seenNext],
+           sizeof(tracker->seenSessions[tracker->seenNext]), "%s", sessionId);
+  tracker->seenNext = (tracker->seenNext + 1) % ROOM_REPLAY_SESSIONS;
   return true;
 }
 

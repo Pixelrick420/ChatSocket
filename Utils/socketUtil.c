@@ -73,7 +73,7 @@ Client *acceptClient(SocketHandle serverSocketFD) {
   client->currentRoom = -1;
   client->error = client->success ? 0 : platformSocketErrno();
 
-  snprintf(client->name, MAX_NAME_LEN, "User%d", rand() % 10000);
+  snprintf(client->name, MAX_NAME_LEN, "pending");
 
   return client;
 }

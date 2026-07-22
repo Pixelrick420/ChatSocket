@@ -235,7 +235,8 @@ bool createRoomSecrets(const char *roomName, const char *password,
                        char verifierHex[SHA256_HEX_SIZE],
                        unsigned char keyOut[32]) {
   unsigned char salt[ROOM_SALT_LEN];
-  if (!roomName || !password || !saltHex || !verifierHex || !keyOut)
+  if (!roomName || !password || strlen(password) < ROOM_SECRET_MIN_LEN ||
+      !saltHex || !verifierHex || !keyOut)
     return false;
   if (RAND_bytes(salt, sizeof(salt)) != 1)
     return false;

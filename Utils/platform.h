@@ -46,3 +46,5 @@ bool platformEnsureDir(const char *path);
 bool platformSecureUserFileFd(int fd);
 char *platformStrDup(const char *src);
 int platformSocketErrno(void);
+bool platformSetSocketNonBlocking(SocketHandle socketFD, bool enabled);
+uint64_t platformMonotonicMs(void);

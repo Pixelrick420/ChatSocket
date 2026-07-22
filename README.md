@@ -6,12 +6,14 @@ ChatSocket is a multi-room chat application written in C for macOS and Linux. It
 - a raw CLI client
 - a modern full-screen terminal UI client
 
-Protocol v3 is a breaking redesign focused on stronger end-to-end security,
+Protocol v4 is a breaking redesign focused on stronger end-to-end security,
 bounded parsing, replay resistance, and testable operation.
 
 ## Highlights
 
 - Protected rooms are now truly end-to-end encrypted against the server.
+- Room messages carry signed sender identity, random session IDs, and monotonic
+  replay counters.
 - Room access verification and room encryption keys are derived separately.
 - Direct messages use session-bound X25519, signed transcripts, AES-256-GCM
   associated data, and monotonic replay counters.
@@ -19,6 +21,8 @@ bounded parsing, replay resistance, and testable operation.
 - The old `ncurses` TUI has been replaced with a custom terminal renderer.
 - Normal launch never invokes a package manager or `sudo`.
 - Clients pin the server certificate fingerprint on first successful connection.
+- Authentication signatures bind the TLS certificate fingerprint, blocking
+  first-use signature relays to another server.
 
 ## Security Model
 
@@ -31,6 +35,11 @@ Protected rooms no longer send the room secret or a directly reusable room key d
 - The server stores only a salted verifier.
 - The room encryption key is derived locally from the room secret with a separate KDF context.
 - Room messages are encrypted client-side with AES-256-GCM.
+- Room name, sender name, identity token, session ID, and sequence are bound as
+  AES-GCM associated data.
+- Every room frame is signed with the sender's Ed25519 identity and checked by
+  both the relay and recipients.
+- New protected rooms require a secret of at least 12 characters.
 
 That means the server can decide whether a join proof is valid, but it cannot decrypt the room contents.
 
@@ -57,8 +66,16 @@ The transport layer is still TLS, but clients now pin the server certificate fin
 - First connection to `host:port`: the fingerprint is printed and stored locally.
 - Later connections: the fingerprint must match.
 - Pin-file access is locked and restricted to the current user.
+- TLS handshakes, authentication, initial name setup, frames, and writes use
+  bounded deadlines.
+- The TLS certificate fingerprint is included in the signed authentication
+  transcript.
 
 This is a trust-on-first-use model, not public CA validation.
+
+Each TLS connection is owned by one client event loop. Server-side access to an
+OpenSSL connection object is serialized, preventing concurrent `SSL_read` and
+`SSL_write` calls on the same object.
 
 ## TUI
 
@@ -158,6 +175,9 @@ pkg-config --cflags --libs openssl
 
 If you want to compile manually, use the same OpenSSL flags plus `-lpthread`.
 
+Use a vendor-supported, fully patched OpenSSL 3.x release. Homebrew users on
+the 3.6 line should use OpenSSL 3.6.3 or newer.
+
 On macOS, ChatSocket uses the system C toolchain plus Homebrew's `pkg-config`
 and `openssl@3`. If the Apple command line tools are missing, install them
 with:
@@ -178,11 +198,13 @@ make sanitize
 
 It recompiles the server and CLI client, starts a local relay, connects two
 test users, exercises open and protected rooms, wrong-secret rejection,
-owner-only topics, member listing, protocol-v3 DM handshakes, encrypted DM
-traffic, contact search, and session reopening.
+owner-only topics, member listing, protocol-v4 DM handshakes, encrypted DM
+traffic, contact search, room-owner transfer, signed room traffic, and session
+reopening.
 
-The server also enforces unique case-insensitive display names, bounded frame
-sizes, 100 frames per second per connection, and five DM handshakes per second.
+The server also requires a confirmed unique case-insensitive display name,
+enforces bounded frame sizes and absolute setup deadlines, limits clients to
+100 frames per second, and permits five DM handshakes per second.
 
 ## Local State
 
@@ -205,9 +227,13 @@ SOCKETCHAT_HISTORY=0 SOCKETCHAT_LOG=0 ./Client/run_tui.sh
 ## Limitations
 
 - This pass targets macOS and Linux. Windows support was intentionally deferred.
-- The room protection model is still password-based, so weak shared secrets remain guessable offline if the verifier is stolen.
-- Protected-room content is confidential from the relay, but group sender
-  attribution and replay protection are not yet cryptographically bound.
+- Trust on first use cannot detect an attacker present during the first
+  connection. Verify the printed fingerprint through another channel when the
+  server matters.
+- Protected rooms remain password-based. The 12-character minimum helps, but
+  predictable secrets can still be guessed offline if the verifier is stolen.
+- Replay tracking is memory-only and retains the latest 256 room and DM
+  sessions per client process.
 - Only one active DM session is supported per client UI.
 - The TUI is intentionally lightweight and terminal-native; it is not using an external widget toolkit.
 

@@ -20,6 +20,7 @@ typedef struct
 #define ROOM_SALT_LEN      16
 #define ROOM_SALT_HEX_SIZE (ROOM_SALT_LEN * 2 + 1)
 #define ROOM_KDF_ID        "SCRYPT-32768-8-1"
+#define ROOM_SECRET_MIN_LEN 12
 #define AES_GCM_OVERHEAD   28
 
 int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,

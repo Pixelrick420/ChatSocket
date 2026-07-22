@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
-. ../bootstrap.sh
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+. ./bootstrap.sh
 
 ensure_build_prereqs
 
@@ -25,41 +26,25 @@ for arg in "$@"; do
     esac
 done
 
-echo "Building TUI client..."
-"$BUILD_CC" client_tui.c \
-    ../Utils/socketUtil.c \
-    ../Utils/sha256.c \
-    ../Utils/aes.c \
-    ../Utils/contacts.c \
-    ../Utils/identity.c \
-    ../Utils/tls.c \
-    ../Utils/ecdh.c \
-    ../Utils/history.c \
-    ../Utils/platform.c \
-    ../Utils/protocol.c \
-    -o client_tui \
-    $(pkg-config --cflags --libs openssl) \
-    -lpthread \
-    -Wall -Wextra -O2
-
-echo "Build successful!"
+make CC="$BUILD_CC" build/client_tui
+CLIENT_BIN="$ROOT_DIR/build/client_tui"
 
 if [ "$TEST_MODE" -eq 1 ]; then
     TEST_DIR=$(mktemp -d)
     mkdir -p "$TEST_DIR/.socketchat"
     echo "Running TUI in TEST mode (temp identity: $TEST_DIR)..."
     if [ -n "$TARGET" ]; then
-        HOME="$TEST_DIR" ./client_tui "$TARGET"
+        HOME="$TEST_DIR" "$CLIENT_BIN" "$TARGET"
     else
-        HOME="$TEST_DIR" ./client_tui
+        HOME="$TEST_DIR" "$CLIENT_BIN"
     fi
     rm -rf "$TEST_DIR"
 else
     if [ -n "$TARGET" ]; then
         echo "Connecting to $TARGET..."
-        ./client_tui "$TARGET"
+        "$CLIENT_BIN" "$TARGET"
     else
         echo "Running client (connecting to 127.0.0.1:2077)..."
-        ./client_tui
+        "$CLIENT_BIN"
     fi
 fi

@@ -12,11 +12,14 @@
 #define MAX_CLIENTS 32
 #define MAX_ROOMS 50
 #define DM_SESSION_ID_HEX_LEN 32
+#define FRAME_TIMEOUT_MS 5000
+#define NAME_SETUP_TIMEOUT_MS 15000
+#define NAME_SETUP_ATTEMPTS 3
 
 typedef struct {
   SocketHandle socketFD;
   SSL *ssl;
-  pthread_mutex_t sendMutex;
+  pthread_mutex_t ioMutex;
   pthread_cond_t idle;
   size_t refs;
   bool closing;
@@ -44,14 +47,14 @@ static bool sslMapAdd(SocketHandle fd, SSL *ssl) {
 
   entry->socketFD = fd;
   entry->ssl = ssl;
-  pthread_mutex_init(&entry->sendMutex, NULL);
+  pthread_mutex_init(&entry->ioMutex, NULL);
   pthread_cond_init(&entry->idle, NULL);
 
   pthread_mutex_lock(&g_sslMutex);
   if (g_sslCount >= MAX_CLIENTS) {
     pthread_mutex_unlock(&g_sslMutex);
     pthread_cond_destroy(&entry->idle);
-    pthread_mutex_destroy(&entry->sendMutex);
+    pthread_mutex_destroy(&entry->ioMutex);
     free(entry);
     return false;
   }
@@ -107,7 +110,7 @@ static void sslMapRemove(SocketHandle fd) {
     return;
   tlsFree(entry->ssl);
   pthread_cond_destroy(&entry->idle);
-  pthread_mutex_destroy(&entry->sendMutex);
+  pthread_mutex_destroy(&entry->ioMutex);
   free(entry);
 }
 
@@ -185,9 +188,9 @@ static bool sendFrame(SocketHandle socketFD, const char *message) {
   if (!entry)
     return false;
 
-  pthread_mutex_lock(&entry->sendMutex);
+  pthread_mutex_lock(&entry->ioMutex);
   bool ok = tlsSend(entry->ssl, message, strlen(message));
-  pthread_mutex_unlock(&entry->sendMutex);
+  pthread_mutex_unlock(&entry->ioMutex);
   sslMapRelease(entry);
   return ok;
 }
@@ -214,13 +217,76 @@ static bool validEncryptedPayload(const char *payload) {
          decodedLen <= MAX_MESSAGE_TEXT + AES_GCM_OVERHEAD;
 }
 
-static ssize_t recvClient(SocketHandle socketFD, char *buf, size_t maxLen) {
+static int waitForClientData(SocketHandle socketFD, uint64_t deadlineMs) {
+  for (;;) {
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(socketFD, &readSet);
+
+    struct timeval timeout;
+    struct timeval *timeoutPtr = NULL;
+    if (deadlineMs > 0) {
+      uint64_t now = platformMonotonicMs();
+      if (now >= deadlineMs)
+        return 0;
+      uint64_t remaining = deadlineMs - now;
+      timeout.tv_sec = (long)(remaining / 1000U);
+      timeout.tv_usec = (int)((remaining % 1000U) * 1000U);
+      timeoutPtr = &timeout;
+    }
+
+    int result = select((int)socketFD + 1, &readSet, NULL, NULL, timeoutPtr);
+    if (result >= 0 || platformSocketErrno() != EINTR)
+      return result;
+  }
+}
+
+static ssize_t recvClient(SocketHandle socketFD, char *buf, size_t maxLen,
+                          unsigned int timeoutMs) {
   SslEntry *entry = sslMapAcquire(socketFD);
   if (!entry)
     return -1;
-  ssize_t result = tlsRecv(entry->ssl, buf, maxLen);
+
+  uint64_t deadline = timeoutMs > 0 ? platformMonotonicMs() + timeoutMs : 0;
+  size_t offset = 0;
+  int status = 1;
+  while (offset < maxLen - 1) {
+    pthread_mutex_lock(&entry->ioMutex);
+    int pending = SSL_pending(entry->ssl);
+    pthread_mutex_unlock(&entry->ioMutex);
+    if (pending == 0 && waitForClientData(socketFD, deadline) <= 0) {
+      status = -1;
+      break;
+    }
+
+    char ch = '\0';
+    pthread_mutex_lock(&entry->ioMutex);
+    int readStatus = tlsReadByte(entry->ssl, &ch);
+    pthread_mutex_unlock(&entry->ioMutex);
+    if (readStatus == TLS_READ_RETRY)
+      continue;
+    if (readStatus <= 0) {
+      if (readStatus == 0 && offset > 0)
+        readStatus = -1;
+      status = readStatus;
+      break;
+    }
+    buf[offset++] = ch;
+    if (offset == 1 && deadline == 0)
+      deadline = platformMonotonicMs() + FRAME_TIMEOUT_MS;
+    if (ch == '\n')
+      break;
+  }
+
+  buf[offset] = '\0';
+  if (offset == maxLen - 1 && buf[offset - 1] != '\n') {
+    fprintf(stderr, "tls: oversized frame rejected\n");
+    status = -1;
+  }
   sslMapRelease(entry);
-  return result;
+  if (status < 0)
+    return -1;
+  return offset == 0 ? 0 : (ssize_t)offset;
 }
 
 static void broadcastToRoomTls(Room *room, SocketHandle senderFD,
@@ -240,6 +306,24 @@ static void broadcastToRoomTls(Room *room, SocketHandle senderFD,
     sendFrame(fds[i], msg);
 }
 
+static void removeRoomMemberLocked(Room *room, SocketHandle socketFD) {
+  if (!room)
+    return;
+
+  char departingToken[TOKEN_STR_SIZE] = {0};
+  bool departingOwner =
+      tokenMapLookupByFD(socketFD, departingToken) &&
+      strcmp(departingToken, room->ownerToken) == 0;
+  if (!removeMemberFromRoom(room, socketFD) || !departingOwner)
+    return;
+
+  room->ownerToken[0] = '\0';
+  for (int i = 0; i < room->memberCount; i++) {
+    if (tokenMapLookupByFD(room->members[i], room->ownerToken))
+      break;
+  }
+}
+
 static void leaveCurrentRoom(Client *client) {
   pthread_mutex_lock(&g_context->mutex);
   if (client->currentRoom == -1) {
@@ -247,8 +331,11 @@ static void leaveCurrentRoom(Client *client) {
     return;
   }
   if (client->currentRoom >= 0 && client->currentRoom < g_context->roomCount)
-    removeMemberFromRoom(g_context->rooms[client->currentRoom], client->socketFD);
+    removeRoomMemberLocked(g_context->rooms[client->currentRoom],
+                           client->socketFD);
   client->currentRoom = -1;
+  client->roomSessionId[0] = '\0';
+  client->roomSendSeq = 0;
   client->waitingForRoomProof = false;
   client->pendingRoomName[0] = '\0';
   pthread_mutex_unlock(&g_context->mutex);
@@ -296,10 +383,16 @@ static bool joinRoom(Client *client, int roomIdx) {
   if (!addMemberToRoom(target, client->socketFD))
     return false;
 
+  if (!target->ownerToken[0])
+    tokenMapLookupByFD(client->socketFD, target->ownerToken);
+
   if (client->currentRoom != -1)
-    removeMemberFromRoom(g_context->rooms[client->currentRoom], client->socketFD);
+    removeRoomMemberLocked(g_context->rooms[client->currentRoom],
+                           client->socketFD);
 
   client->currentRoom = roomIdx;
+  client->roomSessionId[0] = '\0';
+  client->roomSendSeq = 0;
   client->waitingForRoomProof = false;
   client->pendingRoomName[0] = '\0';
   return true;
@@ -323,6 +416,7 @@ static void handleSetName(Client *client, const char *name) {
   }
   snprintf(oldName, sizeof(oldName), "%s", client->name);
   snprintf(client->name, sizeof(client->name), "%s", name);
+  client->hasConfirmedName = true;
   Room *room = client->currentRoom >= 0 &&
                        client->currentRoom < g_context->roomCount
                    ? g_context->rooms[client->currentRoom]
@@ -658,9 +752,21 @@ static void handleRoomLeave(Client *client) {
   sendOk(client->socketFD, "ROOM_LEFT");
 }
 
-static void handleRoomSend(Client *client, const char *payload) {
+static void handleRoomSend(Client *client, const char *sessionId,
+                           const char *sequenceText, const char *payload,
+                           const char *signatureHex) {
   if (!payload || !payload[0] || strlen(payload) > PROTOCOL_MAX_PAYLOAD) {
     sendError(client->socketFD, "Invalid room message");
+    return;
+  }
+
+  uint64_t sequence = 0;
+  unsigned char signature[SIG_BYTES];
+  if (!protocolIsHex(sessionId, DM_SESSION_ID_HEX_LEN) ||
+      !protocolParseSequence(sequenceText, &sequence) ||
+      !protocolIsHex(signatureHex, SIG_HEX_LEN) ||
+      !hexToBytes(signatureHex, signature, sizeof(signature))) {
+    sendError(client->socketFD, "Malformed room message");
     return;
   }
 
@@ -686,9 +792,17 @@ static void handleRoomSend(Client *client, const char *payload) {
     }
   }
   bool protectedRoom = room && room->hasPassword;
+  char roomName[MAX_NAME_LEN] = {0};
+  char senderName[MAX_NAME_LEN] = {0};
+  char senderToken[TOKEN_STR_SIZE] = {0};
+  if (room) {
+    snprintf(roomName, sizeof(roomName), "%s", room->name);
+    snprintf(senderName, sizeof(senderName), "%s", client->name);
+    tokenMapLookupByFD(client->socketFD, senderToken);
+  }
   pthread_mutex_unlock(&g_context->mutex);
 
-  if (!room || !isMember) {
+  if (!room || !isMember || !senderToken[0]) {
     sendError(client->socketFD, "Not in a room");
     return;
   }
@@ -701,8 +815,42 @@ static void handleRoomSend(Client *client, const char *payload) {
     return;
   }
 
+  char transcript[MSG_SIZE * 2];
+  size_t transcriptLen = 0;
+  if (!protocolBuildRoomTranscript(roomName, senderName, senderToken, sessionId,
+                                   sequence, payload, transcript,
+                                   sizeof(transcript), &transcriptLen) ||
+      !identityVerify(senderToken, (const unsigned char *)transcript,
+                      transcriptLen, signature)) {
+    sendError(client->socketFD, "Invalid room message signature");
+    return;
+  }
+
+  pthread_mutex_lock(&g_context->mutex);
+  bool sequenceValid = false;
+  if (client->currentRoom >= 0 && client->currentRoom < g_context->roomCount &&
+      g_context->rooms[client->currentRoom] == room) {
+    if (!client->roomSessionId[0] && sequence == 1) {
+      snprintf(client->roomSessionId, sizeof(client->roomSessionId), "%s",
+               sessionId);
+      sequenceValid = true;
+    } else if (strcmp(client->roomSessionId, sessionId) == 0 &&
+               client->roomSendSeq != UINT64_MAX &&
+               sequence == client->roomSendSeq + 1) {
+      sequenceValid = true;
+    }
+    if (sequenceValid)
+      client->roomSendSeq = sequence;
+  }
+  pthread_mutex_unlock(&g_context->mutex);
+  if (!sequenceValid) {
+    sendError(client->socketFD, "Replayed or out-of-order room message");
+    return;
+  }
+
   char frame[MSG_SIZE * 2];
-  snprintf(frame, sizeof(frame), "ROOM_MSG|%s|%s\n", client->name, payload);
+  snprintf(frame, sizeof(frame), "ROOM_MSG|%s|%s|%s|%s|%s|%s\n", senderName,
+           senderToken, sessionId, sequenceText, payload, signatureHex);
   broadcastToRoomTls(room, client->socketFD, frame);
 }
 
@@ -741,7 +889,8 @@ static bool validSequence(const char *value) {
 }
 
 static bool handleAuth(Client *client, char **parts, size_t partCount,
-                       const unsigned char nonce[CHALLENGE_BYTES]) {
+                       const unsigned char nonce[CHALLENGE_BYTES],
+                       const char *certificateFingerprint) {
   if (partCount != 4 || strcmp(parts[1], PROTOCOL_VERSION) != 0 ||
       strlen(parts[2]) != TOKEN_HEX_LEN || strlen(parts[3]) != SIG_HEX_LEN) {
     sendError(client->socketFD, "Malformed AUTH");
@@ -754,9 +903,10 @@ static bool handleAuth(Client *client, char **parts, size_t partCount,
     return false;
   }
 
-  unsigned char transcript[64];
+  unsigned char transcript[160];
   size_t transcriptLen = 0;
-  if (!protocolBuildAuthTranscript(nonce, CHALLENGE_BYTES, transcript,
+  if (!protocolBuildAuthTranscript(nonce, CHALLENGE_BYTES,
+                                   certificateFingerprint, transcript,
                                    sizeof(transcript), &transcriptLen) ||
       !identityVerify(parts[2], transcript, transcriptLen, sig)) {
     sendError(client->socketFD, "Authentication failed");
@@ -800,6 +950,10 @@ static bool handleFrame(Client *client, char *buffer) {
     handleSetName(client, parts[1]);
     return true;
   }
+  if (!client->hasConfirmedName) {
+    sendError(client->socketFD, "NAME_REQUIRED");
+    return true;
+  }
   if (strcmp(parts[0], "ROOM_CREATE") == 0) {
     handleRoomCreate(client, parts, partCount);
     return true;
@@ -832,8 +986,8 @@ static bool handleFrame(Client *client, char *buffer) {
     handleRoomLeave(client);
     return true;
   }
-  if (strcmp(parts[0], "ROOM_SEND") == 0 && partCount == 2) {
-    handleRoomSend(client, parts[1]);
+  if (strcmp(parts[0], "ROOM_SEND") == 0 && partCount == 5) {
+    handleRoomSend(client, parts[1], parts[2], parts[3], parts[4]);
     return true;
   }
   if (strcmp(parts[0], "DM_INIT") == 0 && partCount == 5 &&
@@ -893,8 +1047,8 @@ static void *handleClient(void *arg) {
   Client *client = (Client *)arg;
   char buffer[MSG_SIZE];
 
-  setSocketTimeoutsMs(client->socketFD, 5000, 5000);
-  SSL *ssl = tlsServerAccept(g_sslCtx, client->socketFD);
+  setSocketTimeoutsMs(client->socketFD, 1000, 5000);
+  SSL *ssl = tlsServerAccept(g_sslCtx, client->socketFD, 5000);
   if (!ssl)
     goto disconnect;
   if (!sslMapAdd(client->socketFD, ssl)) {
@@ -909,29 +1063,55 @@ static void *handleClient(void *arg) {
   }
 
   char nonceHex[CHALLENGE_HEX_SIZE];
+  char certificateFingerprint[SHA256_HEX_SIZE];
+  if (!tlsGetLocalFingerprint(ssl, certificateFingerprint)) {
+    sendError(client->socketFD, "Server certificate unavailable");
+    goto disconnect;
+  }
   bytesToHex(nonce, sizeof(nonce), nonceHex);
   char challenge[MSG_SIZE];
-  snprintf(challenge, sizeof(challenge), "CHALLENGE|%s|%s\n",
-           PROTOCOL_VERSION, nonceHex);
+  snprintf(challenge, sizeof(challenge), "CHALLENGE|%s|%s|%s\n",
+           PROTOCOL_VERSION, nonceHex, certificateFingerprint);
   sendFrame(client->socketFD, challenge);
 
   {
-    ssize_t received = recvClient(client->socketFD, buffer, sizeof(buffer));
+    ssize_t received =
+        recvClient(client->socketFD, buffer, sizeof(buffer), 5000);
     if (received <= 0)
       goto disconnect;
 
     char *parts[PROTOCOL_MAX_PARTS] = {0};
     size_t partCount = protocolSplitFields(buffer, parts, PROTOCOL_MAX_PARTS);
     if (partCount == 0 || strcmp(parts[0], "AUTH") != 0 ||
-        !handleAuth(client, parts, partCount, nonce)) {
+        !handleAuth(client, parts, partCount, nonce, certificateFingerprint)) {
       goto disconnect;
     }
   }
 
-  setSocketTimeoutsMs(client->socketFD, 0, 10000);
+  setSocketTimeoutsMs(client->socketFD, 1000, 10000);
+
+  uint64_t nameDeadline = platformMonotonicMs() + NAME_SETUP_TIMEOUT_MS;
+  int nameAttempts = 0;
+  while (nameAttempts < NAME_SETUP_ATTEMPTS && !client->hasConfirmedName) {
+    uint64_t now = platformMonotonicMs();
+    if (now >= nameDeadline)
+      goto disconnect;
+    unsigned int remainingMs = (unsigned int)(nameDeadline - now);
+    ssize_t received =
+        recvClient(client->socketFD, buffer, sizeof(buffer), remainingMs);
+    if (received <= 0)
+      goto disconnect;
+    bool nameAttempt = strncmp(buffer, "SET_NAME|", 9) == 0;
+    if (!handleFrame(client, buffer))
+      goto disconnect;
+    if (nameAttempt)
+      nameAttempts++;
+  }
+  if (!client->hasConfirmedName)
+    goto disconnect;
 
   while (true) {
-    ssize_t received = recvClient(client->socketFD, buffer, sizeof(buffer));
+    ssize_t received = recvClient(client->socketFD, buffer, sizeof(buffer), 0);
     if (received <= 0)
       break;
 
@@ -982,7 +1162,11 @@ int main(void) {
   }
 
   const char *portEnv = getenv("PORT");
-  int serverPort = portEnv ? atoi(portEnv) : PORT;
+  int serverPort = PORT;
+  if (portEnv && !protocolParsePort(portEnv, &serverPort)) {
+    fprintf(stderr, "Invalid PORT; expected 1-65535\n");
+    return 1;
+  }
 
   g_sslCtx = tlsServerCtxCreate();
   if (!g_sslCtx) {

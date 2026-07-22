@@ -50,21 +50,32 @@ static bool fingerprintPath(char *pathOut, size_t pathSize) {
   return n >= 0 && (size_t)n < pathSize;
 }
 
-static bool tlsPeerFingerprint(SSL *ssl, char hexOut[SHA256_HEX_SIZE]) {
-  X509 *cert = SSL_get1_peer_certificate(ssl);
-  if (!cert)
+static bool certificateFingerprint(X509 *cert,
+                                   char hexOut[SHA256_HEX_SIZE]) {
+  if (!cert || !hexOut)
     return false;
-
   unsigned char digest[SHA256_BYTES_SIZE];
   unsigned int digestLen = 0;
   bool ok = X509_digest(cert, EVP_sha256(), digest, &digestLen) == 1 &&
             digestLen == SHA256_BYTES_SIZE;
-  X509_free(cert);
   if (!ok)
     return false;
 
   bytesToHex(digest, digestLen, hexOut);
   return true;
+}
+
+bool tlsGetPeerFingerprint(SSL *ssl, char hexOut[SHA256_HEX_SIZE]) {
+  X509 *cert = ssl ? SSL_get1_peer_certificate(ssl) : NULL;
+  if (!cert)
+    return false;
+  bool ok = certificateFingerprint(cert, hexOut);
+  X509_free(cert);
+  return ok;
+}
+
+bool tlsGetLocalFingerprint(SSL *ssl, char hexOut[SHA256_HEX_SIZE]) {
+  return ssl && certificateFingerprint(SSL_get_certificate(ssl), hexOut);
 }
 
 static bool generateSelfSignedCert(const char *certPath, const char *keyPath) {
@@ -214,6 +225,48 @@ static bool validateTlsFile(const char *path) {
   return ok;
 }
 
+static X509 *loadCertificate(const char *path) {
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+  int fd = open(path, flags);
+  if (fd < 0 || !platformSecureUserFileFd(fd)) {
+    if (fd >= 0)
+      platformCloseFd(fd);
+    return NULL;
+  }
+  FILE *file = fdopen(fd, "r");
+  if (!file) {
+    platformCloseFd(fd);
+    return NULL;
+  }
+  X509 *certificate = PEM_read_X509(file, NULL, NULL, NULL);
+  fclose(file);
+  return certificate;
+}
+
+static EVP_PKEY *loadPrivateKey(const char *path) {
+  int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+  int fd = open(path, flags);
+  if (fd < 0 || !platformSecureUserFileFd(fd)) {
+    if (fd >= 0)
+      platformCloseFd(fd);
+    return NULL;
+  }
+  FILE *file = fdopen(fd, "r");
+  if (!file) {
+    platformCloseFd(fd);
+    return NULL;
+  }
+  EVP_PKEY *key = PEM_read_PrivateKey(file, NULL, NULL, NULL);
+  fclose(file);
+  return key;
+}
+
 SSL_CTX *tlsServerCtxCreate(void) {
   char certPath[512], keyPath[512];
   if (!certPaths(certPath, sizeof(certPath), keyPath, sizeof(keyPath))) {
@@ -242,16 +295,25 @@ SSL_CTX *tlsServerCtxCreate(void) {
 
   SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
 
-  if (SSL_CTX_use_certificate_file(ctx, certPath, SSL_FILETYPE_PEM) != 1) {
-    tlsPrintErrors("use_certificate_file");
+  X509 *certificate = loadCertificate(certPath);
+  EVP_PKEY *privateKey = loadPrivateKey(keyPath);
+  if (!certificate || !privateKey) {
+    tlsPrintErrors("load certificate material");
+    X509_free(certificate);
+    EVP_PKEY_free(privateKey);
     SSL_CTX_free(ctx);
     return NULL;
   }
-  if (SSL_CTX_use_PrivateKey_file(ctx, keyPath, SSL_FILETYPE_PEM) != 1) {
-    tlsPrintErrors("use_PrivateKey_file");
+  if (SSL_CTX_use_certificate(ctx, certificate) != 1 ||
+      SSL_CTX_use_PrivateKey(ctx, privateKey) != 1) {
+    tlsPrintErrors("install certificate material");
+    X509_free(certificate);
+    EVP_PKEY_free(privateKey);
     SSL_CTX_free(ctx);
     return NULL;
   }
+  X509_free(certificate);
+  EVP_PKEY_free(privateKey);
   if (SSL_CTX_check_private_key(ctx) != 1) {
     tlsPrintErrors("check_private_key");
     SSL_CTX_free(ctx);
@@ -261,21 +323,76 @@ SSL_CTX *tlsServerCtxCreate(void) {
   return ctx;
 }
 
-SSL *tlsServerAccept(SSL_CTX *ctx, SocketHandle fd) {
+static int waitForSocket(SocketHandle fd, bool wantWrite, uint64_t deadlineMs) {
+  for (;;) {
+    fd_set readSet;
+    fd_set writeSet;
+    FD_ZERO(&readSet);
+    FD_ZERO(&writeSet);
+    FD_SET(fd, wantWrite ? &writeSet : &readSet);
+
+    struct timeval timeout;
+    struct timeval *timeoutPtr = NULL;
+    if (deadlineMs > 0) {
+      uint64_t now = platformMonotonicMs();
+      if (now >= deadlineMs)
+        return 0;
+      uint64_t remaining = deadlineMs - now;
+      timeout.tv_sec = (long)(remaining / 1000U);
+      timeout.tv_usec = (int)((remaining % 1000U) * 1000U);
+      timeoutPtr = &timeout;
+    }
+
+    int result = select((int)fd + 1, &readSet, &writeSet, NULL, timeoutPtr);
+    if (result >= 0 || platformSocketErrno() != EINTR)
+      return result;
+  }
+}
+
+static SSL *tlsHandshake(SSL_CTX *ctx, SocketHandle fd, bool server,
+                         unsigned int timeoutMs) {
   SSL *ssl = SSL_new(ctx);
   if (!ssl) {
-    tlsPrintErrors("SSL_new (server)");
+    tlsPrintErrors(server ? "SSL_new (server)" : "SSL_new (client)");
+    return NULL;
+  }
+  SSL_set_fd(ssl, (int)fd);
+
+  if (!platformSetSocketNonBlocking(fd, true)) {
+    tlsPrintErrors("set nonblocking handshake mode");
+    SSL_free(ssl);
     return NULL;
   }
 
-  SSL_set_fd(ssl, (int)fd);
+  uint64_t deadline = timeoutMs > 0 ? platformMonotonicMs() + timeoutMs : 0;
+  bool connected = false;
+  while (deadline == 0 || platformMonotonicMs() < deadline) {
+    int result = server ? SSL_accept(ssl) : SSL_connect(ssl);
+    if (result == 1) {
+      connected = true;
+      break;
+    }
+    int error = SSL_get_error(ssl, result);
+    if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
+      break;
+    if (waitForSocket(fd, error == SSL_ERROR_WANT_WRITE, deadline) <= 0)
+      break;
+  }
 
-  if (SSL_accept(ssl) != 1) {
-    tlsPrintErrors("SSL_accept");
+  bool restored = platformSetSocketNonBlocking(fd, false);
+  if (!connected || !restored) {
+    if (!connected)
+      tlsPrintErrors(server ? "SSL_accept" : "SSL_connect");
+    else
+      tlsPrintErrors("restore blocking socket mode");
     SSL_free(ssl);
     return NULL;
   }
   return ssl;
+}
+
+SSL *tlsServerAccept(SSL_CTX *ctx, SocketHandle fd, unsigned int timeoutMs) {
+  return tlsHandshake(ctx, fd, true, timeoutMs);
 }
 
 SSL_CTX *tlsClientCtxCreate(void) {
@@ -293,21 +410,8 @@ SSL_CTX *tlsClientCtxCreate(void) {
   return ctx;
 }
 
-SSL *tlsClientConnect(SSL_CTX *ctx, SocketHandle fd) {
-  SSL *ssl = SSL_new(ctx);
-  if (!ssl) {
-    tlsPrintErrors("SSL_new (client)");
-    return NULL;
-  }
-
-  SSL_set_fd(ssl, (int)fd);
-
-  if (SSL_connect(ssl) != 1) {
-    tlsPrintErrors("SSL_connect");
-    SSL_free(ssl);
-    return NULL;
-  }
-  return ssl;
+SSL *tlsClientConnect(SSL_CTX *ctx, SocketHandle fd, unsigned int timeoutMs) {
+  return tlsHandshake(ctx, fd, false, timeoutMs);
 }
 
 bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
@@ -320,7 +424,7 @@ bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
   }
 
   char fingerprint[SHA256_HEX_SIZE];
-  if (!tlsPeerFingerprint(ssl, fingerprint))
+  if (!tlsGetPeerFingerprint(ssl, fingerprint))
     return false;
 
   char path[512];
@@ -354,7 +458,10 @@ bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
     platformCloseFd(fd);
     return false;
   }
-  rewind(f);
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return false;
+  }
 
   char line[256];
   while (fgets(line, sizeof(line), f)) {
@@ -388,6 +495,11 @@ bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
     return match;
   }
 
+  if (ferror(f) || fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return false;
+  }
+
   if (fprintf(f, "%s\t%s\n", serverLabel, fingerprint) < 0 ||
       fflush(f) != 0) {
     fclose(f);
@@ -406,43 +518,111 @@ bool tlsTrustOnFirstUse(SSL *ssl, const char *serverLabel) {
 }
 
 bool tlsSend(SSL *ssl, const void *buf, size_t len) {
+  if (!ssl || (!buf && len > 0))
+    return false;
+  int fd = SSL_get_fd(ssl);
+  if (fd < 0 || !platformSetSocketNonBlocking((SocketHandle)fd, true))
+    return false;
+  uint64_t deadline = platformMonotonicMs() + 10000U;
   size_t written = 0;
   while (written < len) {
     int n = SSL_write(ssl, (const char *)buf + written, (int)(len - written));
-    if (n <= 0) {
+    if (n > 0) {
+      written += (size_t)n;
+      continue;
+    }
+    int error = SSL_get_error(ssl, n);
+    if ((error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) ||
+        waitForSocket((SocketHandle)fd, error == SSL_ERROR_WANT_WRITE,
+                      deadline) <= 0) {
       tlsPrintErrors("SSL_write");
+      platformSetSocketNonBlocking((SocketHandle)fd, false);
       return false;
     }
-    written += (size_t)n;
   }
-  return true;
+  return platformSetSocketNonBlocking((SocketHandle)fd, false);
 }
 
 ssize_t tlsRecv(SSL *ssl, char *buf, size_t maxLen) {
+  return tlsRecvDeadline(ssl, buf, maxLen, 0);
+}
+
+int tlsReadByte(SSL *ssl, char *out) {
+  if (!ssl || !out)
+    return -1;
+  int result = SSL_read(ssl, out, 1);
+  if (result > 0)
+    return 1;
+
+  int error = SSL_get_error(ssl, result);
+  if (error == SSL_ERROR_ZERO_RETURN)
+    return 0;
+  if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE)
+    return TLS_READ_RETRY;
+  if (error == SSL_ERROR_SYSCALL) {
+    int socketError = platformSocketErrno();
+    if (result == 0 && socketError == 0)
+      return 0;
+#ifdef _WIN32
+    if (socketError == WSAEWOULDBLOCK || socketError == WSAEINTR)
+#else
+    if (socketError == EAGAIN || socketError == EWOULDBLOCK ||
+        socketError == EINTR)
+#endif
+      return TLS_READ_RETRY;
+  }
+  tlsPrintErrors("SSL_read");
+  return -1;
+}
+
+ssize_t tlsRecvDeadline(SSL *ssl, char *buf, size_t maxLen,
+                        unsigned int timeoutMs) {
   if (maxLen < 2)
     return -1;
+
+  int fd = SSL_get_fd(ssl);
+  if (fd < 0 || !platformSetSocketNonBlocking((SocketHandle)fd, true))
+    return -1;
+
+  uint64_t deadline = timeoutMs > 0 ? platformMonotonicMs() + timeoutMs : 0;
 
   size_t offset = 0;
   while (offset < maxLen - 1) {
     char ch;
-    int n = SSL_read(ssl, &ch, 1);
-    if (n > 0) {
+    int result = tlsReadByte(ssl, &ch);
+    if (result > 0) {
       buf[offset++] = ch;
       if (ch == '\n')
         break;
       continue;
     }
 
-    int err = SSL_get_error(ssl, n);
-    if (err == SSL_ERROR_ZERO_RETURN)
+    if (result == 0) {
+      if (offset > 0) {
+        platformSetSocketNonBlocking((SocketHandle)fd, false);
+        return -1;
+      }
       break;
-    if (err == SSL_ERROR_SYSCALL && errno == 0)
-      break;
-    if (err == SSL_ERROR_SSL)
-      break;
-    tlsPrintErrors("SSL_read");
+    }
+    if (result < 0 && result != TLS_READ_RETRY) {
+      platformSetSocketNonBlocking((SocketHandle)fd, false);
+      return -1;
+    }
+    if (waitForSocket((SocketHandle)fd, SSL_want_write(ssl), deadline) > 0)
+      continue;
+    if (deadline > 0 && platformMonotonicMs() >= deadline) {
+      fprintf(stderr, "tls: frame deadline exceeded\n");
+      platformSetSocketNonBlocking((SocketHandle)fd, false);
+      return -1;
+    }
+    if (deadline == 0)
+      continue;
+    platformSetSocketNonBlocking((SocketHandle)fd, false);
     return -1;
   }
+
+  if (!platformSetSocketNonBlocking((SocketHandle)fd, false))
+    return -1;
 
   buf[offset] = '\0';
   if (offset == maxLen - 1 && offset > 0 && buf[offset - 1] != '\n') {

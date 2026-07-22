@@ -129,13 +129,17 @@ bool identityLoadOrCreate(Identity *id) {
     return false;
 
   int readFd = openPrivateFile(path, O_RDONLY);
+  struct stat keyStat;
+  bool exactSize = readFd >= 0 && fstat(readFd, &keyStat) == 0 &&
+                   keyStat.st_size == IDENTITY_KEY_BYTES;
   FILE *f = readFd >= 0 ? fdopen(readFd, "rb") : NULL;
   if (readFd >= 0 && !f)
     platformCloseFd(readFd);
   if (f) {
     size_t n = fread(id->priv, 1, IDENTITY_KEY_BYTES, f);
+    bool validFile = exactSize && n == IDENTITY_KEY_BYTES && !ferror(f);
     fclose(f);
-    if (n == IDENTITY_KEY_BYTES) {
+    if (validFile) {
       if (!deriveEd25519PublicKey(id->priv, id->pub)) {
         fprintf(stderr, "identity: failed to derive public key\n");
         free(path);
@@ -168,9 +172,27 @@ bool identityLoadOrCreate(Identity *id) {
     free(path);
     return false;
   }
-  ssize_t written = write(fd, id->priv, IDENTITY_KEY_BYTES);
+  size_t offset = 0;
+  while (offset < IDENTITY_KEY_BYTES) {
+    ssize_t written =
+        write(fd, id->priv + offset, IDENTITY_KEY_BYTES - offset);
+    if (written > 0) {
+      offset += (size_t)written;
+      continue;
+    }
+    if (written < 0 && errno == EINTR)
+      continue;
+    break;
+  }
+#ifndef _WIN32
+  bool durable = offset == IDENTITY_KEY_BYTES && fsync(fd) == 0;
+#else
+  bool durable = offset == IDENTITY_KEY_BYTES;
+#endif
+  if (!durable)
+    remove(path);
   platformCloseFd(fd);
-  if (written != (ssize_t)IDENTITY_KEY_BYTES) {
+  if (!durable) {
     fprintf(stderr, "identity: short write to identity.key\n");
     free(path);
     return false;

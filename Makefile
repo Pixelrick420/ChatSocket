@@ -1,6 +1,6 @@
 CC ?= cc
 BUILD_DIR ?= build
-CFLAGS ?= -O2
+CFLAGS ?= -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2
 WARN_FLAGS = -Wall -Wextra -Werror
 OPENSSL_FLAGS = $(shell pkg-config --cflags --libs openssl)
 COMMON_FLAGS = $(CFLAGS) $(WARN_FLAGS)

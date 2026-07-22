@@ -72,6 +72,8 @@ static void testRoomKdfDomainSeparation(void) {
   unsigned char keyA[32];
   unsigned char keyB[32];
 
+  assert(!createRoomSecrets("room-a", "short", verifierA, verifierB, keyA));
+
   assert(verifyRoomSecret("room-a", "correct horse", salt, verifierA, keyA));
   assert(verifyRoomSecret("room-a", "correct horse", salt, verifierB, keyB));
   assert(strcmp(verifierA, verifierB) == 0);
@@ -86,7 +88,9 @@ static void testRoomKdfDomainSeparation(void) {
 static void testProtocolValidation(void) {
   uint64_t sequence = 0;
   unsigned char nonce[32] = {0};
-  unsigned char transcript[64];
+  const char *fingerprint =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  unsigned char transcript[160];
   size_t transcriptLen = 0;
   assert(protocolIsHex("00aAfF", 6));
   assert(!protocolIsHex("00xz", 4));
@@ -98,11 +102,48 @@ static void testProtocolValidation(void) {
   assert(!protocolParseSequence("0", &sequence));
   assert(!protocolParseSequence("01", &sequence));
   assert(!protocolParseSequence("18446744073709551616", &sequence));
-  assert(protocolBuildAuthTranscript(nonce, sizeof(nonce), transcript,
+  int port = 0;
+  assert(protocolParsePort("2077", &port) && port == 2077);
+  assert(!protocolParsePort("0", &port));
+  assert(!protocolParsePort("65536", &port));
+  assert(!protocolParsePort("20x", &port));
+  assert(protocolBuildAuthTranscript(nonce, sizeof(nonce), fingerprint,
+                                     transcript, sizeof(transcript),
+                                     &transcriptLen));
+  assert(transcriptLen == strlen("socketchat-auth-v4|") + sizeof(nonce) + 1 +
+                              strlen(fingerprint));
+  assert(memcmp(transcript, "socketchat-auth-v4|",
+                strlen("socketchat-auth-v4|")) == 0);
+  assert(!protocolBuildAuthTranscript(nonce, sizeof(nonce), "bad", transcript,
+                                      sizeof(transcript), &transcriptLen));
+}
+
+static void testRoomMessageBindingAndReplay(void) {
+  const char *token =
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const char *sessionA = "00112233445566778899aabbccddeeff";
+  const char *sessionB = "ffeeddccbbaa99887766554433221100";
+  char aad[512];
+  char transcript[1024];
+  size_t aadLen = 0;
+  size_t transcriptLen = 0;
+  RoomReplayTracker tracker = {0};
+
+  assert(protocolBuildRoomAad("vault", "Alice", token, sessionA, 1, aad,
+                              sizeof(aad), &aadLen));
+  assert(strstr(aad, "vault|Alice|") != NULL);
+  assert(protocolBuildRoomTranscript("vault", "Alice", token, sessionA, 1,
+                                     "payload", transcript,
                                      sizeof(transcript), &transcriptLen));
-  assert(transcriptLen == strlen("socketchat-auth-v3|") + sizeof(nonce));
-  assert(memcmp(transcript, "socketchat-auth-v3|",
-                strlen("socketchat-auth-v3|")) == 0);
+  assert(transcriptLen == aadLen + strlen("|payload"));
+  assert(strncmp(transcript, aad, aadLen) == 0);
+
+  assert(protocolAcceptRoomSequence(&tracker, token, sessionA, 1));
+  assert(protocolAcceptRoomSequence(&tracker, token, sessionA, 2));
+  assert(!protocolAcceptRoomSequence(&tracker, token, sessionA, 2));
+  assert(!protocolAcceptRoomSequence(&tracker, token, sessionB, 2));
+  assert(protocolAcceptRoomSequence(&tracker, token, sessionB, 1));
+  assert(!protocolAcceptRoomSequence(&tracker, token, sessionA, 1));
 }
 
 static void testRoomCleanupKeepsClientIndexesValid(void) {
@@ -157,6 +198,7 @@ int main(void) {
   testAesAadBinding();
   testRoomKdfDomainSeparation();
   testProtocolValidation();
+  testRoomMessageBindingAndReplay();
   testRoomCleanupKeepsClientIndexesValid();
   testSecureUserFileValidation();
   puts("unit security tests passed");

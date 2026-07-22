@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
-. ../bootstrap.sh
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+. ./bootstrap.sh
 
 ensure_build_prereqs
 
@@ -25,24 +26,8 @@ for arg in "$@"; do
     esac
 done
 
-echo "Compiling client..."
-"$BUILD_CC" client.c \
-    ../Utils/socketUtil.c \
-    ../Utils/sha256.c \
-    ../Utils/aes.c \
-    ../Utils/contacts.c \
-    ../Utils/identity.c \
-    ../Utils/ecdh.c \
-    ../Utils/history.c \
-    ../Utils/tls.c \
-    ../Utils/platform.c \
-    ../Utils/protocol.c \
-    -o client \
-    $(pkg-config --cflags --libs openssl) \
-    -lpthread \
-    -Wall -Wextra -O2
-
-echo "Compiled successfully."
+make CC="$BUILD_CC" build/client
+CLIENT_BIN="$ROOT_DIR/build/client"
 
 if [ "$TEST_MODE" -eq 1 ]; then
     # Create temp HOME dir for test mode (allows multiple clients)
@@ -50,9 +35,9 @@ if [ "$TEST_MODE" -eq 1 ]; then
     mkdir -p "$TEST_DIR/.socketchat"
     echo "Running in TEST mode (temp identity: $TEST_DIR)..."
     if [ -n "$TARGET" ]; then
-        HOME="$TEST_DIR" ./client "$TARGET"
+        HOME="$TEST_DIR" "$CLIENT_BIN" "$TARGET"
     else
-        HOME="$TEST_DIR" ./client
+        HOME="$TEST_DIR" "$CLIENT_BIN"
     fi
 
     # Cleanup after client exits
@@ -60,9 +45,9 @@ if [ "$TEST_MODE" -eq 1 ]; then
 else
     if [ -z "$TARGET" ]; then
         echo "Connecting to localhost:2077..."
-        ./client
+        "$CLIENT_BIN"
     else
         echo "Connecting to $TARGET..."
-        ./client "$TARGET"
+        "$CLIENT_BIN" "$TARGET"
     fi
 fi

@@ -179,6 +179,8 @@ printf '/enter vault\n' >&3
 wait_for_match "$RUNTIME_DIR/a.out" "Room secret:" "client A protected room prompt"
 printf 'correct-horse\n' >&3
 wait_for_count "$RUNTIME_DIR/a.out" "Entered room" 2 "client A protected room entry"
+printf '/members\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Bob.*\[owner\]" "room ownership transfer"
 
 printf '/enter vault\n' >&4
 wait_for_match "$RUNTIME_DIR/b.out" "Room secret:" "client B protected room prompt"

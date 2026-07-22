@@ -113,7 +113,7 @@ bool ecdhDeriveSessionKey(const unsigned char myPrivX25519[32],
 
   unsigned char infoBuf[256];
   int infoLen = snprintf((char *)infoBuf, sizeof(infoBuf),
-                         "socketchat-dm-v3|%s|%s|%s|", initiatorToken,
+                         "socketchat-dm-v4|%s|%s|%s|", initiatorToken,
                          responderToken, sessionId);
   if (infoLen <= 0 || (size_t)infoLen + 64 > sizeof(infoBuf))
     goto out;
@@ -121,7 +121,7 @@ bool ecdhDeriveSessionKey(const unsigned char myPrivX25519[32],
   memcpy(infoBuf + infoLen + 32, responderPub, 32);
   infoLen += 64;
 
-  static const unsigned char salt[] = "socketchat-dm-v3";
+  static const unsigned char salt[] = "socketchat-dm-v4";
   char digestName[] = "SHA256";
   OSSL_PARAM params[] = {
       OSSL_PARAM_construct_utf8_string("digest", digestName, 0),

@@ -15,7 +15,7 @@
 
 #include "platform.h"
 
-#define MSG_SIZE         2048
+#define MSG_SIZE         4096
 #define MAX_MESSAGE_TEXT 1400
 #define PORT             2077
 #define MAX_NAME_LEN       64
@@ -51,7 +51,10 @@ typedef struct
     SocketAddress *address;
     char           name[MAX_NAME_LEN];
     char           pendingRoomName[MAX_NAME_LEN];
+    char           roomSessionId[33];
+    uint64_t       roomSendSeq;
     int            currentRoom;
+    bool           hasConfirmedName;
     bool           waitingForRoomProof;
     time_t         rateWindow;
     unsigned int   framesInWindow;

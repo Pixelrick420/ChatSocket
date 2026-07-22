@@ -1,5 +1,9 @@
 #include "platform.h"
 
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
+
 #ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
 #endif
@@ -176,5 +180,32 @@ int platformSocketErrno(void) {
   return WSAGetLastError();
 #else
   return errno;
+#endif
+}
+
+bool platformSetSocketNonBlocking(SocketHandle socketFD, bool enabled) {
+#ifdef _WIN32
+  u_long mode = enabled ? 1UL : 0UL;
+  return ioctlsocket(socketFD, FIONBIO, &mode) == 0;
+#else
+  int flags = fcntl(socketFD, F_GETFL, 0);
+  if (flags < 0)
+    return false;
+  if (enabled)
+    flags |= O_NONBLOCK;
+  else
+    flags &= ~O_NONBLOCK;
+  return fcntl(socketFD, F_SETFL, flags) == 0;
+#endif
+}
+
+uint64_t platformMonotonicMs(void) {
+#ifdef _WIN32
+  return (uint64_t)GetTickCount64();
+#else
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    return 0;
+  return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
 #endif
 }

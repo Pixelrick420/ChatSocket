@@ -1,28 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
-. ../bootstrap.sh
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+. ./bootstrap.sh
 
 ensure_build_prereqs
 
 PORT=${PORT:-2077}
 
-echo "Compiling server..."
-"$BUILD_CC" server.c \
-    ../Utils/socketUtil.c \
-    ../Utils/sha256.c \
-    ../Utils/identity.c \
-    ../Utils/tls.c \
-    ../Utils/platform.c \
-    ../Utils/protocol.c \
-    ../Utils/aes.c \
-    -o server \
-    $(pkg-config --cflags --libs openssl) \
-    -lpthread \
-    -Wall -Wextra -O2
-
-echo "Compiled successfully."
+make CC="$BUILD_CC" build/server
+SERVER_BIN="$ROOT_DIR/build/server"
 
 if [ "${1:-}" = "ngrok" ]; then
     NGROK_PORT=${2:-$PORT}
@@ -32,7 +20,7 @@ if [ "${1:-}" = "ngrok" ]; then
         exit 1
     fi
 
-    PORT=$NGROK_PORT ./server &
+    PORT=$NGROK_PORT "$SERVER_BIN" &
     SERVER_PID=$!
     sleep 2
 
@@ -55,5 +43,5 @@ if [ "${1:-}" = "ngrok" ]; then
     trap "kill \$SERVER_PID \$NGROK_PID 2>/dev/null" EXIT INT TERM
     wait $SERVER_PID
 else
-    PORT=$PORT ./server
+    PORT=$PORT "$SERVER_BIN"
 fi
