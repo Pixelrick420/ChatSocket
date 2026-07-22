@@ -1,17 +1,29 @@
 #include "aes.h"
 
+#include <limits.h>
 #include <openssl/kdf.h>
 
 #define GCM_NONCE_LEN 12
 #define GCM_TAG_LEN 16
 #define GCM_OVERHEAD (GCM_NONCE_LEN + GCM_TAG_LEN)
 
-void deriveKeyFromPassword(const char *password, unsigned char *key) {
-  sha256Bytes(password, strlen(password), key);
+int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,
+                   const unsigned char *key, unsigned char *ciphertext,
+                   size_t ciphertextSize) {
+  return encryptMessageWithAad(plaintext, plaintext_len, key, NULL, 0,
+                               ciphertext, ciphertextSize);
 }
 
-int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,
-                   const unsigned char *key, unsigned char *ciphertext) {
+int encryptMessageWithAad(const unsigned char *plaintext, size_t plaintext_len,
+                          const unsigned char *key, const unsigned char *aad,
+                          size_t aadLen, unsigned char *ciphertext,
+                          size_t ciphertextSize) {
+
+  if (!plaintext || !key || !ciphertext || plaintext_len > INT_MAX ||
+      aadLen > INT_MAX || (aadLen > 0 && !aad) ||
+      plaintext_len > ciphertextSize ||
+      ciphertextSize - plaintext_len < GCM_OVERHEAD)
+    return -1;
 
   unsigned char nonce[GCM_NONCE_LEN];
   if (RAND_bytes(nonce, GCM_NONCE_LEN) != 1)
@@ -30,6 +42,9 @@ int encryptMessage(const unsigned char *plaintext, size_t plaintext_len,
       1)
     goto err;
   if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
+    goto err;
+  if (aadLen > 0 &&
+      EVP_EncryptUpdate(ctx, NULL, &len, aad, (int)aadLen) != 1)
     goto err;
   if (EVP_EncryptUpdate(ctx, ciphertext + GCM_OVERHEAD, &len, plaintext,
                         (int)plaintext_len) != 1)
@@ -54,15 +69,27 @@ err:
 }
 
 int decryptMessage(const unsigned char *ciphertext, size_t ciphertext_len,
-                   const unsigned char *key, unsigned char *plaintext) {
+                   const unsigned char *key, unsigned char *plaintext,
+                   size_t plaintextSize) {
+  return decryptMessageWithAad(ciphertext, ciphertext_len, key, NULL, 0,
+                               plaintext, plaintextSize);
+}
 
-  if (ciphertext_len < GCM_OVERHEAD)
+int decryptMessageWithAad(const unsigned char *ciphertext,
+                          size_t ciphertext_len, const unsigned char *key,
+                          const unsigned char *aad, size_t aadLen,
+                          unsigned char *plaintext, size_t plaintextSize) {
+
+  if (!ciphertext || !key || !plaintext || ciphertext_len < GCM_OVERHEAD ||
+      aadLen > INT_MAX || (aadLen > 0 && !aad))
     return -1;
 
   const unsigned char *nonce = ciphertext;
   const unsigned char *tag = ciphertext + GCM_NONCE_LEN;
   const unsigned char *body = ciphertext + GCM_OVERHEAD;
   size_t bodyLen = ciphertext_len - GCM_OVERHEAD;
+  if (bodyLen > plaintextSize || bodyLen > INT_MAX)
+    return -1;
 
   EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
   if (!ctx)
@@ -76,6 +103,9 @@ int decryptMessage(const unsigned char *ciphertext, size_t ciphertext_len,
       1)
     goto err;
   if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1)
+    goto err;
+  if (aadLen > 0 &&
+      EVP_DecryptUpdate(ctx, NULL, &len, aad, (int)aadLen) != 1)
     goto err;
   if (EVP_DecryptUpdate(ctx, plaintext, &len, body, (int)bodyLen) != 1)
     goto err;
@@ -100,46 +130,44 @@ err:
   return -1;
 }
 
-void encodeBase64(const unsigned char *input, size_t length, char *output) {
-  EVP_ENCODE_CTX *ctx = EVP_ENCODE_CTX_new();
-  int outlen = 0, final_len = 0;
+bool encodeBase64(const unsigned char *input, size_t length, char *output,
+                  size_t outputSize) {
+  if (!input || !output || length > INT_MAX || length > SIZE_MAX - 2)
+    return false;
 
-  EVP_EncodeInit(ctx);
-  EVP_EncodeUpdate(ctx, (unsigned char *)output, &outlen, input, (int)length);
-  EVP_EncodeFinal(ctx, (unsigned char *)(output + outlen), &final_len);
-  EVP_ENCODE_CTX_free(ctx);
+  size_t required = ((length + 2) / 3) * 4 + 1;
+  if (required > outputSize)
+    return false;
 
-  char *src = output;
-  char *dst = output;
-  while (*src) {
-    if (*src != '\n' && *src != '\r')
-      *dst++ = *src;
-    src++;
-  }
-  *dst = '\0';
+  int written = EVP_EncodeBlock((unsigned char *)output, input, (int)length);
+  if (written < 0 || (size_t)written + 1 > outputSize)
+    return false;
+  output[written] = '\0';
+  return true;
 }
 
-int decodeBase64(const char *input, unsigned char *output) {
-  EVP_ENCODE_CTX *ctx = EVP_ENCODE_CTX_new();
-  int outlen = 0, final_len = 0;
-
-  EVP_DecodeInit(ctx);
-  if (EVP_DecodeUpdate(ctx, output, &outlen, (const unsigned char *)input,
-                       (int)strlen(input)) == -1) {
-    EVP_ENCODE_CTX_free(ctx);
+int decodeBase64(const char *input, unsigned char *output, size_t outputSize) {
+  if (!input || !output)
     return -1;
-  }
-  if (EVP_DecodeFinal(ctx, output + outlen, &final_len) == -1) {
-    EVP_ENCODE_CTX_free(ctx);
+
+  size_t inputLen = strlen(input);
+  if (inputLen == 0 || inputLen > INT_MAX || inputLen % 4 != 0)
     return -1;
-  }
 
-  EVP_ENCODE_CTX_free(ctx);
-  return outlen + final_len;
-}
+  size_t decodedMax = (inputLen / 4) * 3;
+  if (decodedMax > outputSize)
+    return -1;
 
-bool isEncryptedMessage(const char *buffer) {
-  return strncmp(buffer, "ENC:", 4) == 0;
+  int decoded = EVP_DecodeBlock(output, (const unsigned char *)input,
+                                (int)inputLen);
+  if (decoded < 0)
+    return -1;
+
+  if (inputLen >= 1 && input[inputLen - 1] == '=')
+    decoded--;
+  if (inputLen >= 2 && input[inputLen - 2] == '=')
+    decoded--;
+  return decoded;
 }
 
 void bytesToHex(const unsigned char *input, size_t length, char *output) {
@@ -194,9 +222,9 @@ static bool deriveRoomMaterial(const char *password, const unsigned char *salt,
     return false;
   memcpy(derivedSalt + written, salt, saltLen);
 
-  if (PKCS5_PBKDF2_HMAC(password, (int)strlen(password), derivedSalt,
-                        written + (int)saltLen, 120000, EVP_sha256(), 32,
-                        output) != 1) {
+  if (EVP_PBE_scrypt(password, strlen(password), derivedSalt,
+                     (size_t)written + saltLen, 32768, 8, 1,
+                     64U * 1024U * 1024U, output, 32) != 1) {
     return false;
   }
   return true;
@@ -214,24 +242,34 @@ bool createRoomSecrets(const char *roomName, const char *password,
 
   bytesToHex(salt, sizeof(salt), saltHex);
 
+  bool ok = false;
+  unsigned char verifierBytes[32] = {0};
+  unsigned char roomMix[32] = {0};
   if (!deriveRoomMaterial(password, salt, sizeof(salt), "socketchat-room-proof",
                           keyOut))
-    return false;
+    goto out;
 
-  unsigned char verifierBytes[32];
   if (!deriveRoomMaterial(password, salt, sizeof(salt),
                           "socketchat-room-verifier", verifierBytes))
-    return false;
+    goto out;
   bytesToHex(verifierBytes, sizeof(verifierBytes), verifierHex);
 
   if (roomName[0]) {
-    unsigned char roomMix[32];
     sha256Bytes(roomName, strlen(roomName), roomMix);
     for (int i = 0; i < 32; i++)
       keyOut[i] ^= roomMix[i];
   }
+  ok = true;
 
-  return true;
+out:
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(verifierBytes, sizeof(verifierBytes));
+  OPENSSL_cleanse(roomMix, sizeof(roomMix));
+  if (!ok) {
+    OPENSSL_cleanse(keyOut, 32);
+    verifierHex[0] = '\0';
+  }
+  return ok;
 }
 
 bool verifyRoomSecret(const char *roomName, const char *password,
@@ -244,22 +282,32 @@ bool verifyRoomSecret(const char *roomName, const char *password,
   if (!hexToBytes(saltHex, salt, sizeof(salt)))
     return false;
 
+  bool ok = false;
+  unsigned char verifierBytes[32] = {0};
+  unsigned char roomMix[32] = {0};
   if (!deriveRoomMaterial(password, salt, sizeof(salt), "socketchat-room-proof",
                           keyOut))
-    return false;
+    goto out;
 
-  unsigned char verifierBytes[32];
   if (!deriveRoomMaterial(password, salt, sizeof(salt),
                           "socketchat-room-verifier", verifierBytes))
-    return false;
+    goto out;
   bytesToHex(verifierBytes, sizeof(verifierBytes), verifierHex);
 
   if (roomName[0]) {
-    unsigned char roomMix[32];
     sha256Bytes(roomName, strlen(roomName), roomMix);
     for (int i = 0; i < 32; i++)
       keyOut[i] ^= roomMix[i];
   }
+  ok = true;
 
-  return true;
+out:
+  OPENSSL_cleanse(salt, sizeof(salt));
+  OPENSSL_cleanse(verifierBytes, sizeof(verifierBytes));
+  OPENSSL_cleanse(roomMix, sizeof(roomMix));
+  if (!ok) {
+    OPENSSL_cleanse(keyOut, 32);
+    verifierHex[0] = '\0';
+  }
+  return ok;
 }

@@ -1,9 +1,24 @@
 #include "history.h"
 #include "identity.h"
 
+#include <ctype.h>
+#include <fcntl.h>
+
 #define MAX_LINE 2048
 
+static bool historyEnabled(void) {
+  const char *value = getenv("SOCKETCHAT_HISTORY");
+  return !value || strcmp(value, "0") != 0;
+}
+
 static bool historyPath(const char *peerToken, char *out, size_t outSize) {
+  if (!peerToken || strlen(peerToken) != TOKEN_HEX_LEN)
+    return false;
+  for (size_t i = 0; peerToken[i]; i++) {
+    if (!isxdigit((unsigned char)peerToken[i]))
+      return false;
+  }
+
   char dir[512];
   if (!platformGetConfigDir(dir, sizeof(dir)))
     return false;
@@ -33,18 +48,9 @@ static size_t escapeNewlines(const char *msg, char *buf, size_t bufSize) {
   return j;
 }
 
-static void printUnescaped(const char *line) {
-  for (size_t i = 0; line[i]; i++) {
-    if (line[i] == '\\' && line[i + 1] == 'n') {
-      putchar('\n');
-      i++;
-    } else {
-      putchar(line[i]);
-    }
-  }
-}
-
 bool historyAppend(const char *peerToken, bool sent, const char *message) {
+  if (!historyEnabled())
+    return true;
   if (!ensureDir())
     return false;
 
@@ -52,9 +58,26 @@ bool historyAppend(const char *peerToken, bool sent, const char *message) {
   if (!historyPath(peerToken, path, sizeof(path)))
     return false;
 
-  FILE *f = fopen(path, "a");
-  if (!f)
+  int flags = O_WRONLY | O_CREAT | O_APPEND;
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
+  int fd = open(path, flags, 0600);
+  if (fd < 0)
     return false;
+  if (!platformSecureUserFileFd(fd)) {
+    platformCloseFd(fd);
+    return false;
+  }
+  FILE *f = fdopen(fd, "a");
+  if (!f)
+  {
+    platformCloseFd(fd);
+    return false;
+  }
 
   time_t now = time(NULL);
   struct tm tmInfo;
@@ -70,124 +93,6 @@ bool historyAppend(const char *peerToken, bool sent, const char *message) {
   return true;
 }
 
-void historyPrint(const char *peerToken, size_t count) {
-  char path[512];
-  if (!historyPath(peerToken, path, sizeof(path)))
-    return;
-
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    printf("  (no history)\n");
-    return;
-  }
-
-  if (count == 0) {
-
-    char line[MAX_LINE];
-    while (fgets(line, sizeof(line), f)) {
-
-      size_t len = strlen(line);
-      if (len > 0 && line[len - 1] == '\n')
-        line[len - 1] = '\0';
-      printUnescaped(line);
-      putchar('\n');
-    }
-  } else {
-
-    char **ring = calloc(count, sizeof(char *));
-    if (!ring) {
-      fclose(f);
-      return;
-    }
-
-    size_t idx = 0, total = 0;
-    char line[MAX_LINE];
-    while (fgets(line, sizeof(line), f)) {
-      size_t len = strlen(line);
-      if (len > 0 && line[len - 1] == '\n')
-        line[len - 1] = '\0';
-      free(ring[idx % count]);
-      ring[idx % count] = platformStrDup(line);
-      idx++;
-      total++;
-    }
-
-    size_t start = (total > count) ? idx % count : 0;
-    size_t n = (total < count) ? total : count;
-    for (size_t i = 0; i < n; i++) {
-      char *l = ring[(start + i) % count];
-      if (l) {
-        printUnescaped(l);
-        putchar('\n');
-      }
-    }
-
-    for (size_t i = 0; i < count; i++)
-      free(ring[i]);
-    free(ring);
-  }
-
-  fclose(f);
-}
-
-bool historyExists(const char *peerToken) {
-  char path[512];
-  if (!historyPath(peerToken, path, sizeof(path)))
-    return false;
-  struct stat st;
-  return stat(path, &st) == 0 && st.st_size > 0;
-}
-
-void historyListAll(void) {
-  char dir[1024];
-  if (!platformGetConfigDir(dir, sizeof(dir))) {
-    printf("  (cannot read config directory)\n");
-    return;
-  }
-
-  DIR *d = opendir(dir);
-  if (!d) {
-    printf("  (no chat history found)\n");
-    return;
-  }
-
-  int found = 0;
-  struct dirent *entry;
-  while ((entry = readdir(d)) != NULL) {
-
-    if (strncmp(entry->d_name, "dm_", 3) != 0)
-      continue;
-    size_t len = strlen(entry->d_name);
-    if (len < 8)
-      continue;
-    if (strcmp(entry->d_name + len - 4, ".log") != 0)
-      continue;
-
-    size_t tokenLen = len - 3 - 4;
-    char token[TOKEN_STR_SIZE + 1];
-    if (tokenLen > TOKEN_STR_SIZE)
-      tokenLen = TOKEN_STR_SIZE;
-    memcpy(token, entry->d_name + 3, tokenLen);
-    token[tokenLen] = '\0';
-
-    char fullPath[1024 + NAME_MAX + 2];
-    snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, entry->d_name);
-    struct stat st;
-    char timeStr[32] = "unknown";
-    if (stat(fullPath, &st) == 0) {
-      struct tm tmInfo;
-      if (platformLocalTime(st.st_mtime, &tmInfo))
-        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M", &tmInfo);
-    }
-    printf("  %s  (last active: %s)\n", token, timeStr);
-    found++;
-  }
-  closedir(d);
-
-  if (found == 0)
-    printf("  (no DM history found)\n");
-}
-
 static int compareHistoryEntries(const void *lhs, const void *rhs) {
   const HistoryDmEntry *a = (const HistoryDmEntry *)lhs;
   const HistoryDmEntry *b = (const HistoryDmEntry *)rhs;
@@ -200,7 +105,7 @@ static int compareHistoryEntries(const void *lhs, const void *rhs) {
 }
 
 size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
-  if (!entries || maxEntries == 0)
+  if (!historyEnabled() || !entries || maxEntries == 0)
     return 0;
 
   char dir[1024];
@@ -225,7 +130,8 @@ size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
       continue;
 
     size_t len = strlen(entry->d_name);
-    if (len < 8 || strcmp(entry->d_name + len - 4, ".log") != 0)
+    if (len != 3 + TOKEN_HEX_LEN + 4 ||
+        strcmp(entry->d_name + len - 4, ".log") != 0)
       continue;
 
     if (count == capacity) {
@@ -239,10 +145,17 @@ size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
     }
 
     size_t tokenLen = len - 3 - 4;
-    if (tokenLen >= TOKEN_STR_SIZE)
-      tokenLen = TOKEN_STR_SIZE - 1;
     memcpy(allEntries[count].token, entry->d_name + 3, tokenLen);
     allEntries[count].token[tokenLen] = '\0';
+    bool validToken = true;
+    for (size_t i = 0; i < tokenLen; i++) {
+      if (!isxdigit((unsigned char)allEntries[count].token[i])) {
+        validToken = false;
+        break;
+      }
+    }
+    if (!validToken)
+      continue;
 
     char fullPath[1024 + NAME_MAX + 2];
     snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, entry->d_name);
@@ -260,19 +173,4 @@ size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
     entries[i] = allEntries[i];
   free(allEntries);
   return copied;
-}
-
-int historyGetAll(char tokens[][TOKEN_STR_SIZE], size_t maxTokens) {
-  if (!tokens || maxTokens == 0)
-    return 0;
-
-  HistoryDmEntry *entries = calloc(maxTokens, sizeof(HistoryDmEntry));
-  if (!entries)
-    return 0;
-
-  size_t count = historyLoadEntries(entries, maxTokens);
-  for (size_t i = 0; i < count; i++)
-    snprintf(tokens[i], TOKEN_STR_SIZE, "%s", entries[i].token);
-  free(entries);
-  return (int)count;
 }

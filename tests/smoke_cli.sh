@@ -61,6 +61,24 @@ wait_for_match() {
   return 1
 }
 
+wait_for_count() {
+  local file=$1
+  local pattern=$2
+  local expected=$3
+  local label=$4
+
+  for _ in $(seq 1 80); do
+    if [ "$(grep -Ec "$pattern" "$file" || true)" -ge "$expected" ]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "Timed out waiting for $label" >&2
+  tail -n 80 "$file" >&2 || true
+  return 1
+}
+
 ensure_process_alive() {
   local pid=$1
   local label=$2
@@ -100,10 +118,11 @@ compile_target "$BUILD_DIR/client" \
   "$ROOT_DIR/Utils/platform.c" \
   "$ROOT_DIR/Utils/protocol.c"
 
-mkdir -p "$RUNTIME_DIR/home_a" "$RUNTIME_DIR/home_b"
+mkdir -p "$RUNTIME_DIR/home_server" "$RUNTIME_DIR/home_a" "$RUNTIME_DIR/home_b"
 mkfifo "$RUNTIME_DIR/a.in" "$RUNTIME_DIR/b.in"
 
-PORT="$PORT" "$BUILD_DIR/server" >"$RUNTIME_DIR/server.out" 2>&1 &
+HOME="$RUNTIME_DIR/home_server" PORT="$PORT" "$BUILD_DIR/server" \
+  >"$RUNTIME_DIR/server.out" 2>&1 &
 SERVER_PID=$!
 ensure_process_alive "$SERVER_PID" "server" "$RUNTIME_DIR/server.out"
 
@@ -134,8 +153,46 @@ printf '/enter lounge\n' >&4
 wait_for_match "$RUNTIME_DIR/a.out" "Entered room" "client A room entry"
 wait_for_match "$RUNTIME_DIR/b.out" "Entered room" "client B room entry"
 
+printf '/name Alice\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Name is already in use" "duplicate name rejection"
+printf 'still Bob\n' >&4
+wait_for_match "$RUNTIME_DIR/a.out" "Bob: still Bob" "name rejection preserves identity"
+
 printf 'hello room from Alice\n' >&3
 wait_for_match "$RUNTIME_DIR/b.out" "Alice: hello room from Alice" "room message delivery"
+
+printf '/topic Secure lounge\n' >&3
+wait_for_match "$RUNTIME_DIR/b.out" "Alice set topic: Secure lounge" "room topic update"
+printf '/topic Unauthorized update\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Only room owner may change topic" "room topic authorization"
+printf '/topic\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Topic: Secure lounge" "room topic lookup"
+printf '/members\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Members in #lounge" "room member list"
+wait_for_match "$RUNTIME_DIR/b.out" "Alice.*\[owner\]" "room owner marker"
+
+printf '/create vault -p\n' >&3
+wait_for_match "$RUNTIME_DIR/a.out" "New room secret:" "protected room creation prompt"
+printf 'correct-horse\n' >&3
+wait_for_match "$RUNTIME_DIR/a.out" "Room created" "protected room creation"
+printf '/enter vault\n' >&3
+wait_for_match "$RUNTIME_DIR/a.out" "Room secret:" "client A protected room prompt"
+printf 'correct-horse\n' >&3
+wait_for_count "$RUNTIME_DIR/a.out" "Entered room" 2 "client A protected room entry"
+
+printf '/enter vault\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Room secret:" "client B protected room prompt"
+printf 'wrong-secret\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Incorrect room secret" "protected room rejection"
+printf '/enter vault\n' >&4
+wait_for_count "$RUNTIME_DIR/b.out" "Room secret:" 2 "client B protected room retry"
+printf 'correct-horse\n' >&4
+wait_for_count "$RUNTIME_DIR/b.out" "Entered room" 2 "client B protected room entry"
+printf '/members\n' >&3
+wait_for_match "$RUNTIME_DIR/a.out" "Members in #vault" "protected room membership sync"
+
+printf 'encrypted hello from Alice\n' >&3
+wait_for_match "$RUNTIME_DIR/b.out" "Alice: encrypted hello from Alice" "protected room message"
 
 printf '/token\n' >&4
 wait_for_match "$RUNTIME_DIR/b.out" "Your token: [0-9a-f]{64}" "client B token"
@@ -148,6 +205,9 @@ fi
 printf '/dm %s\n' "$B_TOKEN" >&3
 wait_for_match "$RUNTIME_DIR/a.out" "DM session ready with" "client A DM handshake"
 wait_for_match "$RUNTIME_DIR/b.out" "DM session established with" "client B DM handshake"
+
+printf '/dm %s\n' "$B_TOKEN" >&3
+wait_for_match "$RUNTIME_DIR/a.out" "Close current DM with /dmleave first" "active DM replacement rejection"
 
 printf '/nick Work Friend\n' >&3
 sleep 0.4

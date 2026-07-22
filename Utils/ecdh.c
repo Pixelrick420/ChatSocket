@@ -1,25 +1,14 @@
 #include "ecdh.h"
 
-static int hexNibble(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-  if (c >= 'a' && c <= 'f')
-    return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F')
-    return c - 'A' + 10;
-  return -1;
-}
-
-bool ecdhDeriveKey(const unsigned char myPrivX25519[32],
-                   const unsigned char peerPubX25519[32],
-                   unsigned char keyOut[32]) {
+static bool ecdhDeriveSharedSecret(const unsigned char myPrivX25519[32],
+                                   const unsigned char peerPubX25519[32],
+                                   unsigned char sharedSecret[32]) {
   bool ok = false;
   EVP_PKEY *privKey = NULL;
   EVP_PKEY *pubKey = NULL;
   EVP_PKEY_CTX *ctx = NULL;
 
-  unsigned char sharedSecret[32];
-  size_t sharedLen = sizeof(sharedSecret);
+  size_t sharedLen = 32;
 
   privKey =
       EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, myPrivX25519, 32);
@@ -55,39 +44,6 @@ bool ecdhDeriveKey(const unsigned char myPrivX25519[32],
     }
   }
 
-  {
-    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
-    if (!kdf)
-      goto out;
-    EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
-    EVP_KDF_free(kdf);
-    if (!kctx)
-      goto out;
-
-    static const char saltStr[] = "socketchat-dm-v1";
-    unsigned char saltBuf[sizeof(saltStr) - 1];
-    memcpy(saltBuf, saltStr, sizeof(saltBuf));
-
-    unsigned char keyBuf[32];
-    memcpy(keyBuf, sharedSecret, 32);
-
-    char digestName[] = "SHA256";
-
-    OSSL_PARAM params[] = {
-        OSSL_PARAM_construct_utf8_string("digest", digestName, 0),
-        OSSL_PARAM_construct_octet_string("key", keyBuf, 32),
-        OSSL_PARAM_construct_octet_string("salt", saltBuf, sizeof(saltBuf)),
-        OSSL_PARAM_construct_end()};
-
-    int rc = EVP_KDF_derive(kctx, keyOut, 32, params);
-    EVP_KDF_CTX_free(kctx);
-    memset(keyBuf, 0, sizeof(keyBuf));
-    if (rc <= 0) {
-      fprintf(stderr, "ecdh: HKDF failed\n");
-      goto out;
-    }
-  }
-
   ok = true;
 
 out:
@@ -97,7 +53,8 @@ out:
     EVP_PKEY_free(privKey);
   if (pubKey)
     EVP_PKEY_free(pubKey);
-  memset(sharedSecret, 0, sizeof(sharedSecret));
+  if (!ok)
+    OPENSSL_cleanse(sharedSecret, 32);
   return ok;
 }
 
@@ -133,34 +90,38 @@ bool ecdhDeriveSessionKey(const unsigned char myPrivX25519[32],
                           const unsigned char peerPubX25519[32],
                           const char *initiatorToken,
                           const char *responderToken,
+                          const char *sessionId,
                           const unsigned char initiatorPub[32],
                           const unsigned char responderPub[32],
                           unsigned char keyOut[32]) {
   unsigned char shared[32];
-  if (!initiatorToken || !responderToken || !initiatorPub || !responderPub)
+  if (!initiatorToken || !responderToken || !sessionId || !initiatorPub ||
+      !responderPub)
     return false;
-  if (!ecdhDeriveKey(myPrivX25519, peerPubX25519, shared))
+  if (!ecdhDeriveSharedSecret(myPrivX25519, peerPubX25519, shared))
     return false;
 
   bool ok = false;
+  EVP_KDF_CTX *kctx = NULL;
   EVP_KDF *kdf = EVP_KDF_fetch(NULL, "HKDF", NULL);
   if (!kdf)
-    return false;
-  EVP_KDF_CTX *kctx = EVP_KDF_CTX_new(kdf);
+    goto out;
+  kctx = EVP_KDF_CTX_new(kdf);
   EVP_KDF_free(kdf);
   if (!kctx)
-    return false;
+    goto out;
 
   unsigned char infoBuf[256];
-  int infoLen = snprintf((char *)infoBuf, sizeof(infoBuf), "socketchat-dm-v2|%s|%s|",
-                         initiatorToken, responderToken);
+  int infoLen = snprintf((char *)infoBuf, sizeof(infoBuf),
+                         "socketchat-dm-v3|%s|%s|%s|", initiatorToken,
+                         responderToken, sessionId);
   if (infoLen <= 0 || (size_t)infoLen + 64 > sizeof(infoBuf))
     goto out;
   memcpy(infoBuf + infoLen, initiatorPub, 32);
   memcpy(infoBuf + infoLen + 32, responderPub, 32);
   infoLen += 64;
 
-  static const unsigned char salt[] = "socketchat-dm-v2";
+  static const unsigned char salt[] = "socketchat-dm-v3";
   char digestName[] = "SHA256";
   OSSL_PARAM params[] = {
       OSSL_PARAM_construct_utf8_string("digest", digestName, 0),
@@ -172,23 +133,8 @@ bool ecdhDeriveSessionKey(const unsigned char myPrivX25519[32],
   ok = EVP_KDF_derive(kctx, keyOut, 32, params) > 0;
 
 out:
-  EVP_KDF_CTX_free(kctx);
-  memset(shared, 0, sizeof(shared));
+  if (kctx)
+    EVP_KDF_CTX_free(kctx);
+  OPENSSL_cleanse(shared, sizeof(shared));
   return ok;
-}
-
-bool tokenToX25519PublicKey(const char *token, unsigned char x25519Out[32]) {
-  if (!token || strlen(token) != TOKEN_HEX_LEN)
-    return false;
-
-  unsigned char ed25519Pub[IDENTITY_KEY_BYTES];
-  for (int i = 0; i < 32; i++) {
-    int hi = hexNibble(token[i * 2]);
-    int lo = hexNibble(token[i * 2 + 1]);
-    if (hi < 0 || lo < 0)
-      return false;
-    ed25519Pub[i] = (unsigned char)((hi << 4) | lo);
-  }
-
-  return identityEd25519PubToX25519(ed25519Pub, x25519Out);
 }

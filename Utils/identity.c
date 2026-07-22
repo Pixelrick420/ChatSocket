@@ -1,5 +1,6 @@
 #include "identity.h"
 
+#include <ctype.h>
 #include <limits.h>
 
 static void bytesToHex(const unsigned char *bytes, size_t len, char *out) {
@@ -68,6 +69,45 @@ static char *usernameFilePath(void) {
   return path;
 }
 
+static int openPrivateFile(const char *path, int flags) {
+#ifdef O_NOFOLLOW
+  flags |= O_NOFOLLOW;
+#endif
+#ifdef O_NONBLOCK
+  flags |= O_NONBLOCK;
+#endif
+  int fd = open(path, flags, 0600);
+  if (fd < 0)
+    return -1;
+  if (!platformSecureUserFileFd(fd)) {
+    platformCloseFd(fd);
+    return -1;
+  }
+  return fd;
+}
+
+static bool safeStoredToken(const char *token) {
+  if (!token || strlen(token) != TOKEN_HEX_LEN)
+    return false;
+  for (size_t i = 0; token[i]; i++) {
+    if (!isxdigit((unsigned char)token[i]))
+      return false;
+  }
+  return true;
+}
+
+static bool safeStoredName(const char *name, bool allowSpaces) {
+  if (!name || !name[0] || strlen(name) >= MAX_NAME_LEN)
+    return false;
+  for (size_t i = 0; name[i]; i++) {
+    unsigned char ch = (unsigned char)name[i];
+    if (!(isalnum(ch) || ch == '-' || ch == '_' || ch == '.' ||
+          (allowSpaces && (ch == ' ' || ch == '\'' || ch == '@'))))
+      return false;
+  }
+  return true;
+}
+
 static bool deriveEd25519PublicKey(const unsigned char seed[IDENTITY_KEY_BYTES],
                                    unsigned char pub[IDENTITY_KEY_BYTES]) {
   EVP_PKEY *pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed,
@@ -88,7 +128,10 @@ bool identityLoadOrCreate(Identity *id) {
   if (!path)
     return false;
 
-  FILE *f = fopen(path, "rb");
+  int readFd = openPrivateFile(path, O_RDONLY);
+  FILE *f = readFd >= 0 ? fdopen(readFd, "rb") : NULL;
+  if (readFd >= 0 && !f)
+    platformCloseFd(readFd);
   if (f) {
     size_t n = fread(id->priv, 1, IDENTITY_KEY_BYTES, f);
     fclose(f);
@@ -102,7 +145,9 @@ bool identityLoadOrCreate(Identity *id) {
       free(path);
       return true;
     }
-    fprintf(stderr, "identity: key file truncated — regenerating\n");
+    fprintf(stderr, "identity: key file is invalid; refusing to replace it\n");
+    free(path);
+    return false;
   }
 
   if (RAND_bytes(id->priv, IDENTITY_KEY_BYTES) != 1) {
@@ -117,7 +162,7 @@ bool identityLoadOrCreate(Identity *id) {
     return false;
   }
 
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  int fd = openPrivateFile(path, O_WRONLY | O_CREAT | O_EXCL);
   if (fd < 0) {
     perror("identity: open identity.key for writing");
     free(path);
@@ -195,70 +240,6 @@ bool identityVerify(const char *pubHex, const unsigned char *msg, size_t msgLen,
   return rc == 1;
 }
 
-bool identityEd25519PubToX25519(
-    const unsigned char ed25519Pub[IDENTITY_KEY_BYTES],
-    unsigned char x25519Out[IDENTITY_KEY_BYTES]) {
-
-  unsigned char y[32];
-  memcpy(y, ed25519Pub, 32);
-  y[31] &= 0x7f;
-
-  BIGNUM *Y = BN_lebin2bn(y, 32, NULL);
-  BIGNUM *one = BN_new();
-  BIGNUM *p = BN_new();
-  BIGNUM *num = BN_new();
-  BIGNUM *den = BN_new();
-  BIGNUM *u = BN_new();
-  BN_CTX *bnctx = BN_CTX_new();
-
-  bool ok = false;
-
-  if (!Y || !one || !p || !num || !den || !u || !bnctx)
-    goto bnout;
-
-  BN_one(one);
-
-  BN_set_bit(p, 255);
-  BN_sub_word(p, 19);
-
-  BN_mod_add(num, one, Y, p, bnctx);
-
-  BN_mod_sub(den, one, Y, p, bnctx);
-
-  BN_mod_inverse(den, den, p, bnctx);
-  BN_mod_mul(u, num, den, p, bnctx);
-
-  if (BN_bn2lebinpad(u, x25519Out, 32) == 32)
-    ok = true;
-
-bnout:
-  BN_free(Y);
-  BN_free(one);
-  BN_free(p);
-  BN_free(num);
-  BN_free(den);
-  BN_free(u);
-  BN_CTX_free(bnctx);
-  return ok;
-}
-
-bool identityEd25519PrivToX25519(
-    const unsigned char ed25519Priv[IDENTITY_KEY_BYTES],
-    unsigned char x25519Out[IDENTITY_KEY_BYTES]) {
-
-  unsigned char h[64];
-  if (SHA512(ed25519Priv, IDENTITY_KEY_BYTES, h) == NULL)
-    return false;
-
-  memcpy(x25519Out, h, 32);
-  x25519Out[0] &= 248;
-  x25519Out[31] &= 127;
-  x25519Out[31] |= 64;
-
-  memset(h, 0, sizeof(h));
-  return true;
-}
-
 void identityPrintToken(const Identity *id) {
   printf("Your token: %s\n", id->token);
 }
@@ -267,7 +248,10 @@ bool identityLoadUsername(char *username, size_t maxLen) {
   char *path = usernameFilePath();
   if (!path) return false;
 
-  FILE *f = fopen(path, "r");
+  int fd = openPrivateFile(path, O_RDONLY);
+  FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
+  if (fd >= 0 && !f)
+    platformCloseFd(fd);
   if (!f) {
     free(path);
     return false;
@@ -281,7 +265,7 @@ bool identityLoadUsername(char *username, size_t maxLen) {
     }
     fclose(f);
     free(path);
-    return len > 0;
+    return safeStoredName(username, false);
   }
   fclose(f);
   free(path);
@@ -289,10 +273,15 @@ bool identityLoadUsername(char *username, size_t maxLen) {
 }
 
 bool identitySaveUsername(const char *username) {
+  if (!safeStoredName(username, false))
+    return false;
   char *path = usernameFilePath();
   if (!path) return false;
 
-  FILE *f = fopen(path, "w");
+  int fd = openPrivateFile(path, O_WRONLY | O_CREAT | O_TRUNC);
+  FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
+  if (fd >= 0 && !f)
+    platformCloseFd(fd);
   if (!f) {
     free(path);
     return false;
@@ -315,7 +304,10 @@ size_t identityLoadDmNickEntries(DmNickEntry *entries, size_t maxEntries) {
   char path[512];
   snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
 
-  FILE *f = fopen(path, "r");
+  int fd = openPrivateFile(path, O_RDONLY);
+  FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
+  if (fd >= 0 && !f)
+    platformCloseFd(fd);
   if (!f)
     return 0;
 
@@ -333,7 +325,7 @@ size_t identityLoadDmNickEntries(DmNickEntry *entries, size_t maxEntries) {
       continue;
     *tab++ = '\0';
 
-    if (strlen(line) != TOKEN_HEX_LEN || tab[0] == '\0')
+    if (!safeStoredToken(line) || !safeStoredName(tab, true))
       continue;
 
     snprintf(entries[count].token, sizeof(entries[count].token), "%s", line);
@@ -358,12 +350,16 @@ bool identitySaveDmNickEntries(const DmNickEntry *entries, size_t count) {
   char path[512];
   snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
 
-  FILE *f = fopen(path, "w");
+  int fd = openPrivateFile(path, O_WRONLY | O_CREAT | O_TRUNC);
+  FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
+  if (fd >= 0 && !f)
+    platformCloseFd(fd);
   if (!f)
     return false;
 
   for (size_t i = 0; i < count; i++) {
-    if (entries[i].token[0] && entries[i].nick[0])
+    if (safeStoredToken(entries[i].token) &&
+        safeStoredName(entries[i].nick, true))
       fprintf(f, "%s\t%s\n", entries[i].token, entries[i].nick);
   }
 

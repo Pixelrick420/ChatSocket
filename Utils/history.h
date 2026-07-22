@@ -23,10 +23,6 @@ typedef struct {
 } HistoryDmEntry;
 
 bool historyAppend(const char *peerToken, bool sent, const char *message);
-void historyPrint(const char *peerToken, size_t count);
-bool historyExists(const char *peerToken);
-void historyListAll(void);
 size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries);
-int historyGetAll(char tokens[][TOKEN_STR_SIZE], size_t maxTokens);
 
 #endif
