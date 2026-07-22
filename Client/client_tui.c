@@ -693,9 +693,7 @@ static int wrapTextToWidth(const char *text, int width,
 }
 
 static bool sendRawFrame(const char *frame) {
-  pthread_mutex_lock(&g_stateMutex);
   bool connected = g_input.connected;
-  pthread_mutex_unlock(&g_stateMutex);
   if (!connected)
     return false;
 
@@ -1525,6 +1523,10 @@ static KeyEvent readKeyEvent(void) {
         return (KeyEvent){KEY_UP, 0};
       if (seq[1] == 'B')
         return (KeyEvent){KEY_DOWN, 0};
+      if (seq[1] == '3') {
+        read(STDIN_FILENO, &seq[2], 1);
+        return (KeyEvent){KEY_BACKSPACE, 0};
+      }
       if (seq[1] == '5') {
         read(STDIN_FILENO, &seq[2], 1);
         return (KeyEvent){KEY_PGUP, 0};
