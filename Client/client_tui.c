@@ -1662,7 +1662,7 @@ static void uiDrawHelp(int rows, int cols) {
   uiDrawSectionLabel(y + 2, x + 2, w - 4, "ROOMS", NULL, theme);
   uiDrawTextFitted(y + 3, x + 2, w - 4, 233, 237, 243, theme->panelR,
                    theme->panelG, theme->panelB,
-                   "/rooms   /create <room>   /create <room> -p");
+                   "/rooms   /create <room>   /create <room> -p [secret]");
   uiDrawTextFitted(y + 4, x + 2, w - 4, 233, 237, 243, theme->panelR,
                    theme->panelG, theme->panelB,
                    "/enter <room>   /leave   /members   /topic [text|-]");
@@ -1681,7 +1681,7 @@ static void uiDrawHelp(int rows, int cols) {
     uiDrawTextFitted(y + 12, x + 2, w - 4, theme->accentR, theme->accentG,
                      theme->accentB, theme->panelR, theme->panelG,
                      theme->panelB,
-                     "Enter sends. Up/Down scroll. PgUp/PgDn jumps. ? toggles this panel.");
+                     "Enter sends. Up/Down scroll. PgUp/PgDn jumps. /help toggles this panel.");
     uiDrawTextFitted(y + 13, x + 2, w - 4, theme->mutedR, theme->mutedG,
                      theme->mutedB, theme->panelR, theme->panelG,
                      theme->panelB,
@@ -1689,7 +1689,8 @@ static void uiDrawHelp(int rows, int cols) {
   } else {
     uiDrawTextFitted(y + 12, x + 2, w - 4, theme->mutedR, theme->mutedG,
                      theme->mutedB, theme->panelR, theme->panelG,
-                     theme->panelB, "Enter sends. Up/Down scroll. ? closes help.");
+                     theme->panelB,
+                     "Enter sends. Up/Down scroll. /help closes help.");
   }
 }
 
@@ -1742,7 +1743,7 @@ static void renderUi(void) {
 
   if (compact) {
     char compactStatus[160];
-    snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s%s | ? help",
+    snprintf(compactStatus, sizeof(compactStatus), "%s | %s | %s%s | /help",
              connected ? "connected" : "offline", context, security,
              g_roomsLoading ? " | syncing rooms" : "");
     bool showIdentity = cols >= 74;
@@ -1768,7 +1769,7 @@ static void renderUi(void) {
 
     char statusLine[256];
     snprintf(statusLine, sizeof(statusLine),
-             "%s | relay %s | rooms %d | direct %d%s | ? help",
+             "%s | relay %s | rooms %d | direct %d%s | /help",
              connected ? "connected" : "offline", g_serverLabel, g_roomCount,
              dmContactCount(), g_roomsLoading ? " | syncing" : "");
     uiDrawTextFitted(2, 2, cols - 3, 127, 140, 156, 21, 25, 31, statusLine);
@@ -1821,8 +1822,7 @@ typedef enum {
   KEY_UP,
   KEY_DOWN,
   KEY_PGUP,
-  KEY_PGDN,
-  KEY_HELP
+  KEY_PGDN
 } KeyType;
 
 typedef struct {
@@ -1840,8 +1840,6 @@ static KeyEvent readKeyEvent(void) {
     return (KeyEvent){KEY_ENTER, 0};
   if (c == 127 || c == 8)
     return (KeyEvent){KEY_BACKSPACE, 0};
-  if (c == '?')
-    return (KeyEvent){KEY_HELP, 0};
   if (c == 27) {
     char seq[3] = {0};
     if (read(STDIN_FILENO, &seq[0], 1) <= 0)
@@ -2054,23 +2052,31 @@ static bool processCommand(char *message) {
     sendRawFrame(frame);
     return true;
   }
-  if (strncmp(message, "/create ", 8) == 0) {
+  if (strcmp(message, "/create") == 0 ||
+      strncmp(message, "/create ", 8) == 0) {
     char room[MAX_NAME_LEN];
-    char option[16] = {0};
-    char extra[2] = {0};
-    int count = sscanf(message + 8, "%63s %15s %1s", room, option, extra);
-    if (count == 2 && strcmp(option, "-p") == 0 &&
-        protocolIsSafeIdentifier(room)) {
+    const char *inlineSecret = NULL;
+    ProtocolRoomCreateMode mode = protocolParseRoomCreateArgs(
+        message + 7, room, sizeof(room), &inlineSecret);
+    if (mode == PROTOCOL_ROOM_CREATE_INVALID) {
+      addMessage(UI_MSG_ERROR,
+                 "[!] Usage: /create <room> [-p [secret]]");
+      return true;
+    }
+    if (mode != PROTOCOL_ROOM_CREATE_OPEN) {
       snprintf(g_room.pendingName, sizeof(g_room.pendingName), "%s", room);
       g_input.readingRoomSecret = true;
       g_input.creatingRoomSecret = true;
-      g_input.roomSecret[0] = '\0';
-      g_input.roomSecretLen = 0;
-      addMessage(UI_MSG_INFO, "[*] Enter new room secret below");
-      return true;
-    }
-    if (count != 1 || !protocolIsSafeIdentifier(room)) {
-      addMessage(UI_MSG_ERROR, "[!] Usage: /create <room> [-p]");
+      if (mode == PROTOCOL_ROOM_CREATE_INLINE) {
+        snprintf(g_input.roomSecret, sizeof(g_input.roomSecret), "%s",
+                 inlineSecret);
+        g_input.roomSecretLen = strlen(g_input.roomSecret);
+        finalizeRoomSecretEntry();
+      } else {
+        g_input.roomSecret[0] = '\0';
+        g_input.roomSecretLen = 0;
+        addMessage(UI_MSG_INFO, "[*] Enter new room secret below");
+      }
       return true;
     }
     char frame[MSG_SIZE];
@@ -2217,10 +2223,6 @@ static bool processCommand(char *message) {
 }
 
 static void handleKey(KeyEvent key) {
-  if (key.type == KEY_HELP) {
-    g_showHelp = !g_showHelp;
-    return;
-  }
   if (key.type == KEY_UP) {
     g_messageScroll++;
     return;
@@ -2261,9 +2263,11 @@ static void handleKey(KeyEvent key) {
   if (key.type == KEY_ENTER) {
     char message[MSG_SIZE];
     snprintf(message, sizeof(message), "%s", g_input.buffer);
-    g_input.buffer[0] = '\0';
+    OPENSSL_cleanse(g_input.buffer, sizeof(g_input.buffer));
     g_input.length = 0;
-    if (!processCommand(message))
+    bool keepRunning = processCommand(message);
+    OPENSSL_cleanse(message, sizeof(message));
+    if (!keepRunning)
       g_input.connected = false;
     return;
   }
@@ -2278,13 +2282,27 @@ static void handleKey(KeyEvent key) {
 }
 
 static void eventLoop(void) {
+  bool redraw = true;
+  int previousRows = 0;
+  int previousCols = 0;
   while (true) {
+    int rows = 0;
+    int cols = 0;
+    uiGetSize(&rows, &cols);
+    if (rows != previousRows || cols != previousCols)
+      redraw = true;
+
     pthread_mutex_lock(&g_stateMutex);
     bool connected = g_input.connected;
-    renderUi();
+    if (redraw) {
+      renderUi();
+      previousRows = rows;
+      previousCols = cols;
+    }
     pthread_mutex_unlock(&g_stateMutex);
     if (!connected)
       break;
+    redraw = false;
 
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -2302,6 +2320,7 @@ static void eventLoop(void) {
       continue;
     if (rc < 0) {
       handleDisconnect();
+      redraw = true;
       continue;
     }
     if (networkReady || FD_ISSET(g_socketFD, &rfds)) {
@@ -2315,6 +2334,7 @@ static void eventLoop(void) {
       pthread_mutex_lock(&g_stateMutex);
       displayIncomingMessage(incoming);
       pthread_mutex_unlock(&g_stateMutex);
+      redraw = true;
       if (networkReady)
         continue;
     }
@@ -2323,6 +2343,7 @@ static void eventLoop(void) {
       pthread_mutex_lock(&g_stateMutex);
       handleKey(key);
       pthread_mutex_unlock(&g_stateMutex);
+      redraw = true;
     }
   }
 }
@@ -2474,7 +2495,7 @@ int main(int argc, char *argv[]) {
   sendRawFrame(nameFrame);
   sendRawFrame("ROOM_LIST\n");
   addMessage(UI_MSG_INFO, "[*] Connected to server");
-  addMessage(UI_MSG_INFO, "[*] Type /help or press ? for commands");
+  addMessage(UI_MSG_INFO, "[*] Type /help for commands");
 
   eventLoop();
   if (g_socketFD != INVALID_SOCKET_HANDLE)

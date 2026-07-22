@@ -94,6 +94,42 @@ bool protocolParsePort(const char *value, int *out) {
   return true;
 }
 
+ProtocolRoomCreateMode protocolParseRoomCreateArgs(
+    const char *args, char *room, size_t roomSize, const char **secretOut) {
+  if (!args || !room || roomSize < 2 || !secretOut)
+    return PROTOCOL_ROOM_CREATE_INVALID;
+  *secretOut = NULL;
+
+  while (isspace((unsigned char)*args))
+    args++;
+  const char *roomStart = args;
+  while (*args && !isspace((unsigned char)*args))
+    args++;
+  size_t roomLen = (size_t)(args - roomStart);
+  if (roomLen == 0 || roomLen >= roomSize)
+    return PROTOCOL_ROOM_CREATE_INVALID;
+  memcpy(room, roomStart, roomLen);
+  room[roomLen] = '\0';
+  if (!protocolIsSafeIdentifier(room))
+    return PROTOCOL_ROOM_CREATE_INVALID;
+
+  while (isspace((unsigned char)*args))
+    args++;
+  if (!*args)
+    return PROTOCOL_ROOM_CREATE_OPEN;
+  if (args[0] != '-' || args[1] != 'p' ||
+      (args[2] && !isspace((unsigned char)args[2])))
+    return PROTOCOL_ROOM_CREATE_INVALID;
+
+  args += 2;
+  while (isspace((unsigned char)*args))
+    args++;
+  if (!*args)
+    return PROTOCOL_ROOM_CREATE_PROMPT;
+  *secretOut = args;
+  return PROTOCOL_ROOM_CREATE_INLINE;
+}
+
 bool protocolBuildAuthTranscript(const unsigned char *nonce, size_t nonceLen,
                                  const char *certificateFingerprint,
                                  unsigned char *out, size_t outSize,

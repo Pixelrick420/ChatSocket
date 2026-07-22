@@ -84,7 +84,7 @@ The new TUI is a custom full-screen terminal interface built directly on ANSI te
 - split conversation and sidebar layout
 - room list and DM list on the right
 - scrollback with arrow keys
-- in-app help with `?`
+- in-app help with `/help`
 - dark, modern terminal aesthetic instead of the old `ncurses` look
 
 ## Quick Start
@@ -149,6 +149,8 @@ If your system uses another package manager, install the dependencies manually a
 - `/rooms`: refresh the server room list
 - `/create <room>`: create an open room
 - `/create <room> -p`: create a protected room using a masked secret prompt
+- `/create <room> -p <secret>`: create a protected room inline; the masked
+  prompt is safer when others can see your terminal
 - `/enter <room>`: enter a room
 - `/leave`: leave the current room
 - `/members`: list current room members with identity fingerprints

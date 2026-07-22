@@ -24,12 +24,21 @@ typedef struct {
   size_t seenNext;
 } RoomReplayTracker;
 
+typedef enum {
+  PROTOCOL_ROOM_CREATE_INVALID = 0,
+  PROTOCOL_ROOM_CREATE_OPEN,
+  PROTOCOL_ROOM_CREATE_PROMPT,
+  PROTOCOL_ROOM_CREATE_INLINE
+} ProtocolRoomCreateMode;
+
 size_t protocolSplitFields(char *line, char **parts, size_t maxParts);
 bool protocolIsSafeIdentifier(const char *value);
 bool protocolIsHex(const char *value, size_t expectedLen);
 bool protocolIsSafeText(const char *value, size_t maxLen);
 bool protocolParseSequence(const char *value, uint64_t *out);
 bool protocolParsePort(const char *value, int *out);
+ProtocolRoomCreateMode protocolParseRoomCreateArgs(
+    const char *args, char *room, size_t roomSize, const char **secretOut);
 bool protocolBuildAuthTranscript(const unsigned char *nonce, size_t nonceLen,
                                  const char *certificateFingerprint,
                                  unsigned char *out, size_t outSize,

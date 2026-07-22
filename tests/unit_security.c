@@ -118,6 +118,34 @@ static void testProtocolValidation(void) {
                                       sizeof(transcript), &transcriptLen));
 }
 
+static void testRoomCreateCommandParsing(void) {
+  char room[64];
+  const char *secret = NULL;
+
+  assert(protocolParseRoomCreateArgs("lounge", room, sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_OPEN);
+  assert(strcmp(room, "lounge") == 0 && secret == NULL);
+  assert(protocolParseRoomCreateArgs("vault -p", room, sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_PROMPT);
+  assert(secret == NULL);
+  assert(protocolParseRoomCreateArgs("vault -p password1234", room,
+                                     sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_INLINE);
+  assert(strcmp(secret, "password1234") == 0);
+  assert(protocolParseRoomCreateArgs("vault -p pass phrase 1234", room,
+                                     sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_INLINE);
+  assert(strcmp(secret, "pass phrase 1234") == 0);
+  assert(protocolParseRoomCreateArgs("", room, sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_INVALID);
+  assert(protocolParseRoomCreateArgs("bad!room -p password1234", room,
+                                     sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_INVALID);
+  assert(protocolParseRoomCreateArgs("vault --private password1234", room,
+                                     sizeof(room), &secret) ==
+         PROTOCOL_ROOM_CREATE_INVALID);
+}
+
 static void testRoomMessageBindingAndReplay(void) {
   const char *token =
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -198,6 +226,7 @@ int main(void) {
   testAesAadBinding();
   testRoomKdfDomainSeparation();
   testProtocolValidation();
+  testRoomCreateCommandParsing();
   testRoomMessageBindingAndReplay();
   testRoomCleanupKeepsClientIndexesValid();
   testSecureUserFileValidation();

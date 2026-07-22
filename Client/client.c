@@ -1170,7 +1170,7 @@ static bool processInput(char *message) {
         "/members\n"
         "/topic [text|-]\n"
         "/create <room>\n"
-        "/create <room> -p\n"
+        "/create <room> -p [secret]\n"
         "/enter <room>\n"
         "/leave\n"
         "/dm <contact>\n"
@@ -1229,27 +1229,37 @@ static bool processInput(char *message) {
     sendRawFrame(frame);
     return true;
   }
-  if (strncmp(message, "/create ", 8) == 0) {
+  if (strcmp(message, "/create") == 0 ||
+      strncmp(message, "/create ", 8) == 0) {
     char room[MAX_NAME_LEN];
-    char option[16] = {0};
-    char extra[2] = {0};
-    int count = sscanf(message + 8, "%63s %15s %1s", room, option, extra);
-    if (count == 2 && strcmp(option, "-p") == 0 &&
-        protocolIsSafeIdentifier(room)) {
+    const char *inlineSecret = NULL;
+    ProtocolRoomCreateMode mode = protocolParseRoomCreateArgs(
+        message + 7, room, sizeof(room), &inlineSecret);
+    if (mode == PROTOCOL_ROOM_CREATE_INVALID) {
+      printMessage(COLOR_RED, "[!] ",
+                   "Usage: /create <room> [-p [secret]]\n");
+      return true;
+    }
+    if (mode != PROTOCOL_ROOM_CREATE_OPEN) {
       snprintf(g_room.pendingName, sizeof(g_room.pendingName), "%s", room);
       pthread_mutex_lock(&g_input.mutex);
       g_input.readingRoomSecret = true;
       g_input.creatingRoomSecret = true;
-      g_input.roomSecret[0] = '\0';
-      g_input.roomSecretLen = 0;
+      if (mode == PROTOCOL_ROOM_CREATE_INLINE) {
+        snprintf(g_input.roomSecret, sizeof(g_input.roomSecret), "%s",
+                 inlineSecret);
+        g_input.roomSecretLen = strlen(g_input.roomSecret);
+      } else {
+        g_input.roomSecret[0] = '\0';
+        g_input.roomSecretLen = 0;
+      }
       pthread_mutex_unlock(&g_input.mutex);
-      printf(COLOR_YELLOW "New room secret: " COLOR_RESET);
-      fflush(stdout);
-      return true;
-    }
-
-    if (count != 1 || !protocolIsSafeIdentifier(room)) {
-      printMessage(COLOR_RED, "[!] ", "Usage: /create <room> [-p]\n");
+      if (mode == PROTOCOL_ROOM_CREATE_INLINE) {
+        finalizeRoomSecretEntry();
+      } else {
+        printf(COLOR_YELLOW "New room secret: " COLOR_RESET);
+        fflush(stdout);
+      }
       return true;
     }
     char frame[MSG_SIZE];
@@ -1469,16 +1479,19 @@ static void inputLoop(void) {
     if (c == '\n' || c == '\r') {
       normalBuf[normalLen] = '\0';
       printf("\n");
-      if (!processInput(normalBuf))
+      bool keepRunning = processInput(normalBuf);
+      OPENSSL_cleanse(normalBuf, sizeof(normalBuf));
+      if (!keepRunning)
         break;
 
       normalLen = 0;
-      normalBuf[0] = '\0';
       pthread_mutex_lock(&g_input.mutex);
-      g_input.buffer[0] = '\0';
+      bool secretPromptActive = g_input.readingRoomSecret;
+      OPENSSL_cleanse(g_input.buffer, sizeof(g_input.buffer));
       g_input.length = 0;
       pthread_mutex_unlock(&g_input.mutex);
-      printPrompt();
+      if (!secretPromptActive)
+        printPrompt();
     } else if ((c == 127 || c == 8) && normalLen > 0) {
       normalBuf[--normalLen] = '\0';
       printf("\b \b");

@@ -196,6 +196,17 @@ wait_for_match "$RUNTIME_DIR/a.out" "Members in #vault" "protected room membersh
 printf 'encrypted hello from Alice\n' >&3
 wait_for_match "$RUNTIME_DIR/b.out" "Alice: encrypted hello from Alice" "protected room message"
 
+printf '/create\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Usage: /create" "bare create usage"
+printf '/create short-inline -p password\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "at least 12 characters" "short inline secret rejection"
+printf '/create inline-vault -p password1234\n' >&4
+wait_for_match "$RUNTIME_DIR/b.out" "Room created" "inline protected room creation"
+printf '/enter inline-vault\n' >&3
+wait_for_match "$RUNTIME_DIR/a.out" "Room secret:" "inline protected room prompt"
+printf 'password1234\n' >&3
+wait_for_count "$RUNTIME_DIR/a.out" "Entered room" 3 "inline protected room entry"
+
 printf '/token\n' >&4
 wait_for_match "$RUNTIME_DIR/b.out" "Your token: [0-9a-f]{64}" "client B token"
 B_TOKEN="$(grep -Eo 'Your token: [0-9a-f]{64}' "$RUNTIME_DIR/b.out" | tail -n1 | awk '{print $3}')"
