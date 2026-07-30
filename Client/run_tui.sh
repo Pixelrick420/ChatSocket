@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-
+DEFAULT_SERVER="129.154.42.68:2077"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 . ./bootstrap.sh
@@ -44,7 +44,7 @@ else
         echo "Connecting to $TARGET..."
         "$CLIENT_BIN" "$TARGET"
     else
-        echo "Running client (connecting to 127.0.0.1:2077)..."
-        "$CLIENT_BIN"
+        echo "Connecting to $DEFAULT_SERVER..."
+        "$CLIENT_BIN" "$DEFAULT_SERVER"
     fi
 fi

@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+DEFAULT_SERVER="129.154.42.68:2077"
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -44,8 +45,8 @@ if [ "$TEST_MODE" -eq 1 ]; then
     rm -rf "$TEST_DIR"
 else
     if [ -z "$TARGET" ]; then
-        echo "Connecting to localhost:2077..."
-        "$CLIENT_BIN"
+        echo "Connecting to $DEFAULT_SERVER..."
+        "$CLIENT_BIN" "$DEFAULT_SERVER"
     else
         echo "Connecting to $TARGET..."
         "$CLIENT_BIN" "$TARGET"
