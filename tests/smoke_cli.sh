@@ -103,7 +103,8 @@ compile_target "$BUILD_DIR/server" \
   "$ROOT_DIR/Utils/tls.c" \
   "$ROOT_DIR/Utils/platform.c" \
   "$ROOT_DIR/Utils/protocol.c" \
-  "$ROOT_DIR/Utils/aes.c"
+  "$ROOT_DIR/Utils/aes.c" \
+  "$ROOT_DIR/Utils/session.c"
 
 compile_target "$BUILD_DIR/client" \
   "$ROOT_DIR/Client/client.c" \

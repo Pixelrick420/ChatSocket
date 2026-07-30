@@ -17,8 +17,9 @@ all: $(BUILD_DIR)/server $(BUILD_DIR)/client $(BUILD_DIR)/client_tui
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/server: Server/server.c $(COMMON_UTILS) $(HEADERS) | $(BUILD_DIR)
-	$(CC) $(COMMON_FLAGS) Server/server.c $(COMMON_UTILS) -o $@ $(OPENSSL_FLAGS) -lpthread
+$(BUILD_DIR)/server: Server/server.c $(COMMON_UTILS) Utils/session.c $(HEADERS) | $(BUILD_DIR)
+	$(CC) $(COMMON_FLAGS) Server/server.c $(COMMON_UTILS) Utils/session.c \
+		-o $@ $(OPENSSL_FLAGS) -lpthread
 
 $(BUILD_DIR)/client: Client/client.c $(CLIENT_UTILS) $(HEADERS) | $(BUILD_DIR)
 	$(CC) $(COMMON_FLAGS) Client/client.c $(CLIENT_UTILS) -o $@ $(OPENSSL_FLAGS) -lpthread

@@ -1,6 +1,7 @@
 #include "../Utils/aes.h"
 #include "../Utils/identity.h"
 #include "../Utils/protocol.h"
+#include "../Utils/session.h"
 #include "../Utils/socketUtil.h"
 #include "../Utils/tls.h"
 
@@ -1085,6 +1086,14 @@ static void *handleClient(void *arg) {
     }
   }
 
+  uint64_t sessionNum = sessionCounterIncrement();
+  char clientAddrStr[INET_ADDRSTRLEN] = "unknown";
+  if (client->address) {
+    struct sockaddr_in *addr = (struct sockaddr_in *)client->address;
+    inet_ntop(AF_INET, &(addr->sin_addr), clientAddrStr, sizeof(clientAddrStr));
+  }
+  printf("Client connected (session #%lu) from %s\n", (unsigned long)sessionNum,
+         clientAddrStr);
   setSocketTimeoutsMs(client->socketFD, 1000, 10000);
 
   uint64_t nameDeadline = platformMonotonicMs() + NAME_SETUP_TIMEOUT_MS;
@@ -1198,6 +1207,10 @@ int main(void) {
   printf("Server listening on port %d (TLS, protocol v%s)\n", serverPort,
          PROTOCOL_VERSION);
 
+  if (!sessionCounterInit("session_count.bin")) {
+    fprintf(stderr, "Warning: Failed to initialize session counter\n");
+  }
+
   g_context = createServerContext(serverSocketFD, MAX_CLIENTS, MAX_ROOMS);
 
   pthread_t cleanupTid;
@@ -1241,5 +1254,6 @@ int main(void) {
   SSL_CTX_free(g_sslCtx);
   platformCloseSocket(serverSocketFD);
   platformCleanup();
+  sessionCounterCleanup();
   return 0;
 }
