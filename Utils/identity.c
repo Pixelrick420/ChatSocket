@@ -1,8 +1,5 @@
 #include "identity.h"
 
-#include <ctype.h>
-#include <limits.h>
-
 static void bytesToHex(const unsigned char *bytes, size_t len, char *out) {
   static const char hex[] = "0123456789abcdef";
   for (size_t i = 0; i < len; i++) {
@@ -37,7 +34,7 @@ static bool hexToBytes(const char *hex, size_t hexLen, unsigned char *out,
 }
 
 static char *identityFilePath(void) {
-  char dirPath[512];
+  char dirPath[CONFIG_DIR_MAX];
   if (!platformGetConfigDir(dirPath, sizeof(dirPath))) {
     fprintf(stderr, "identity: cannot determine config directory\n");
     return NULL;
@@ -48,24 +45,26 @@ static char *identityFilePath(void) {
     return NULL;
   }
 
-  char *path = malloc(512);
+  char *path = malloc(IDENTITY_PATH_MAX);
   if (!path)
     return NULL;
-  snprintf(path, 512, "%s%cidentity.key", dirPath, SOCKETCHAT_PATH_SEP);
+  snprintf(path, IDENTITY_PATH_MAX, "%s%cidentity.key", dirPath,
+           SOCKETCHAT_PATH_SEP);
   return path;
 }
 
 static char *usernameFilePath(void) {
-  char dirPath[512];
+  char dirPath[CONFIG_DIR_MAX];
   if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
     return NULL;
   if (!platformEnsureDir(dirPath))
     return NULL;
 
-  char *path = malloc(512);
+  char *path = malloc(IDENTITY_PATH_MAX);
   if (!path)
     return NULL;
-  snprintf(path, 512, "%s%cusername", dirPath, SOCKETCHAT_PATH_SEP);
+  snprintf(path, IDENTITY_PATH_MAX, "%s%cusername", dirPath,
+           SOCKETCHAT_PATH_SEP);
   return path;
 }
 
@@ -174,8 +173,7 @@ bool identityLoadOrCreate(Identity *id) {
   }
   size_t offset = 0;
   while (offset < IDENTITY_KEY_BYTES) {
-    ssize_t written =
-        write(fd, id->priv + offset, IDENTITY_KEY_BYTES - offset);
+    ssize_t written = write(fd, id->priv + offset, IDENTITY_KEY_BYTES - offset);
     if (written > 0) {
       offset += (size_t)written;
       continue;
@@ -268,7 +266,8 @@ void identityPrintToken(const Identity *id) {
 
 bool identityLoadUsername(char *username, size_t maxLen) {
   char *path = usernameFilePath();
-  if (!path) return false;
+  if (!path)
+    return false;
 
   int fd = openPrivateFile(path, O_RDONLY);
   FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
@@ -282,7 +281,8 @@ bool identityLoadUsername(char *username, size_t maxLen) {
   int readSize = (maxLen > (size_t)INT_MAX) ? INT_MAX : (int)maxLen;
   if (fgets(username, readSize, f)) {
     size_t len = strlen(username);
-    while (len > 0 && (username[len-1] == '\n' || username[len-1] == '\r')) {
+    while (len > 0 &&
+           (username[len - 1] == '\n' || username[len - 1] == '\r')) {
       username[--len] = '\0';
     }
     fclose(f);
@@ -298,7 +298,8 @@ bool identitySaveUsername(const char *username) {
   if (!safeStoredName(username, false))
     return false;
   char *path = usernameFilePath();
-  if (!path) return false;
+  if (!path)
+    return false;
 
   int fd = openPrivateFile(path, O_WRONLY | O_CREAT | O_TRUNC);
   FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;
@@ -319,12 +320,13 @@ size_t identityLoadDmNickEntries(DmNickEntry *entries, size_t maxEntries) {
   if (!entries || maxEntries == 0)
     return 0;
 
-  char dirPath[512];
+  char dirPath[CONFIG_DIR_MAX];
   if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
     return 0;
 
-  char path[512];
-  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
+  char path[IDENTITY_PATH_MAX];
+  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath,
+           SOCKETCHAT_PATH_SEP);
 
   int fd = openPrivateFile(path, O_RDONLY);
   FILE *f = fd >= 0 ? fdopen(fd, "r") : NULL;
@@ -363,14 +365,15 @@ bool identitySaveDmNickEntries(const DmNickEntry *entries, size_t count) {
   if (!entries)
     return false;
 
-  char dirPath[512];
+  char dirPath[CONFIG_DIR_MAX];
   if (!platformGetConfigDir(dirPath, sizeof(dirPath)))
     return false;
   if (!platformEnsureDir(dirPath))
     return false;
 
-  char path[512];
-  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath, SOCKETCHAT_PATH_SEP);
+  char path[IDENTITY_PATH_MAX];
+  snprintf(path, sizeof(path), "%s%cdm_nicks.tsv", dirPath,
+           SOCKETCHAT_PATH_SEP);
 
   int fd = openPrivateFile(path, O_WRONLY | O_CREAT | O_TRUNC);
   FILE *f = fd >= 0 ? fdopen(fd, "w") : NULL;

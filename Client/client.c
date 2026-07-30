@@ -14,7 +14,8 @@
 #include <termios.h>
 
 #if defined(__GNUC__) || defined(__clang__)
-#define PRINTF_FMT(fmtIndex, firstArg) __attribute__((format(printf, fmtIndex, firstArg)))
+#define PRINTF_FMT(fmtIndex, firstArg)                                         \
+  __attribute__((format(printf, fmtIndex, firstArg)))
 #else
 #define PRINTF_FMT(fmtIndex, firstArg)
 #endif
@@ -62,7 +63,7 @@ typedef struct {
 } InputState;
 
 static FILE *g_logFile = NULL;
-static char g_logPath[512] = {0};
+static char g_logPath[512 + 32] = {0};
 static SocketHandle g_socketFD = INVALID_SOCKET_HANDLE;
 static SSL *g_ssl = NULL;
 static Identity g_identity = {0};
@@ -151,7 +152,7 @@ static void disableRawMode(void) {
 static void enableRawMode(void) {
   struct termios raw;
   tcgetattr(STDIN_FILENO, &raw);
-  raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+  raw.c_lflag &= (tcflag_t) ~(ICANON | ECHO);
   raw.c_cc[VMIN] = 1;
   raw.c_cc[VTIME] = 0;
   tcsetattr(STDIN_FILENO, TCSANOW, &raw);
@@ -160,9 +161,7 @@ static void enableRawMode(void) {
 static void clearScreen(void) { print("\033[2J\033[H"); }
 static void eraseInputLine(void) { print("\r\033[K"); }
 
-static void clearRoomState(void) {
-  OPENSSL_cleanse(&g_room, sizeof(g_room));
-}
+static void clearRoomState(void) { OPENSSL_cleanse(&g_room, sizeof(g_room)); }
 
 static bool startRoomSession(void) {
   unsigned char session[DM_SESSION_ID_BYTES];
@@ -174,9 +173,7 @@ static bool startRoomSession(void) {
   return true;
 }
 
-static void clearDmSession(void) {
-  OPENSSL_cleanse(&g_dm, sizeof(g_dm));
-}
+static void clearDmSession(void) { OPENSSL_cleanse(&g_dm, sizeof(g_dm)); }
 
 static void reloadDmHistoryIndex(void) {
   contactsLoad(&g_contacts);
@@ -184,9 +181,7 @@ static void reloadDmHistoryIndex(void) {
     contactsRememberToken(&g_contacts, g_dm.peerToken);
 }
 
-static void saveDmNicknames(void) {
-  contactsSaveNicknames(&g_contacts);
-}
+static void saveDmNicknames(void) { contactsSaveNicknames(&g_contacts); }
 
 static void rememberDmToken(const char *token) {
   contactsRememberToken(&g_contacts, token);
@@ -196,9 +191,7 @@ static void formatDmLabel(const char *token, char *out, size_t outSize) {
   contactsFormatLabel(&g_contacts, token, out, outSize);
 }
 
-static int dmContactCount(void) {
-  return (int)g_contacts.count;
-}
+static int dmContactCount(void) { return (int)g_contacts.count; }
 
 static bool isNumericReference(const char *text) {
   if (!text || !text[0])
@@ -245,8 +238,8 @@ static void copyTrimmed(const char *input, char *out, size_t outSize) {
   out[len] = '\0';
 }
 
-static bool splitFirstArgument(const char *input, char *first,
-                               size_t firstSize, const char **restOut) {
+static bool splitFirstArgument(const char *input, char *first, size_t firstSize,
+                               const char **restOut) {
   if (!first || firstSize == 0)
     return false;
 
@@ -317,8 +310,9 @@ static bool resolveDmReference(const char *input, char *tokenOut,
 
   if (status == CONTACT_LOOKUP_AMBIGUOUS) {
     if (announceAmbiguity) {
-      printMessage(COLOR_RED, "[!] ",
-                   "Multiple contacts match that query. Use /search or a number.\n");
+      printMessage(
+          COLOR_RED, "[!] ",
+          "Multiple contacts match that query. Use /search or a number.\n");
       printContactMatches(query, matches, matchCount);
     }
     return false;
@@ -353,7 +347,7 @@ static void printPrompt(void) {
 
 static void printMessage(const char *color, const char *prefix,
                          const char *message) {
-  char formatted[MSG_SIZE * 2];
+  char formatted[MSG_SIZE * 2 + 32];
   snprintf(formatted, sizeof(formatted), "%s%s%s%s", color, prefix, message,
            COLOR_RESET);
   print(formatted);
@@ -375,13 +369,13 @@ static bool signDmFrame(const char *frameType, const char *fromToken,
                         const char *responderPubHex,
                         unsigned char sigOut[SIG_BYTES]) {
   char transcript[384];
-  int len = snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s|%s|%s",
-                     frameType, fromToken, toToken, sessionId,
-                     initiatorPubHex, responderPubHex);
+  int len =
+      snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s|%s|%s", frameType,
+               fromToken, toToken, sessionId, initiatorPubHex, responderPubHex);
   if (len <= 0 || (size_t)len >= sizeof(transcript))
     return false;
-  return identitySign(&g_identity, (const unsigned char *)transcript, (size_t)len,
-                      sigOut);
+  return identitySign(&g_identity, (const unsigned char *)transcript,
+                      (size_t)len, sigOut);
 }
 
 static bool verifyDmFrame(const char *frameType, const char *fromToken,
@@ -390,13 +384,13 @@ static bool verifyDmFrame(const char *frameType, const char *fromToken,
                           const char *responderPubHex,
                           const unsigned char sig[SIG_BYTES]) {
   char transcript[384];
-  int len = snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s|%s|%s",
-                     frameType, fromToken, toToken, sessionId,
-                     initiatorPubHex, responderPubHex);
+  int len =
+      snprintf(transcript, sizeof(transcript), "%s|%s|%s|%s|%s|%s", frameType,
+               fromToken, toToken, sessionId, initiatorPubHex, responderPubHex);
   if (len <= 0 || (size_t)len >= sizeof(transcript))
     return false;
-  return identityVerify(fromToken, (const unsigned char *)transcript, (size_t)len,
-                        sig);
+  return identityVerify(fromToken, (const unsigned char *)transcript,
+                        (size_t)len, sig);
 }
 
 static bool rememberDmSession(const char *sessionId) {
@@ -453,10 +447,10 @@ static bool encryptAndSendRoom(const char *message) {
   char transcript[MSG_SIZE * 2];
   size_t transcriptLen = 0;
   unsigned char signature[SIG_BYTES];
-  if (!protocolBuildRoomTranscript(
-          g_room.currentName, g_username, g_identity.token, g_room.sessionId,
-          sequence, encodedText, transcript, sizeof(transcript),
-          &transcriptLen) ||
+  if (!protocolBuildRoomTranscript(g_room.currentName, g_username,
+                                   g_identity.token, g_room.sessionId, sequence,
+                                   encodedText, transcript, sizeof(transcript),
+                                   &transcriptLen) ||
       !identitySign(&g_identity, (const unsigned char *)transcript,
                     transcriptLen, signature))
     return false;
@@ -484,17 +478,17 @@ static bool encryptAndSendDm(const char *message) {
   }
   uint64_t sequence = g_dm.sendSeq + 1;
   char aad[256];
-  int aadLen = snprintf(aad, sizeof(aad), "DM_MSG|%s|%s|%s|%" PRIu64,
-                        g_dm.sessionId, g_identity.token, g_dm.peerToken,
-                        sequence);
+  int aadLen =
+      snprintf(aad, sizeof(aad), "DM_MSG|%s|%s|%s|%" PRIu64, g_dm.sessionId,
+               g_identity.token, g_dm.peerToken, sequence);
   if (aadLen <= 0 || (size_t)aadLen >= sizeof(aad))
     return false;
 
   unsigned char ciphertext[MAX_MESSAGE_TEXT + AES_GCM_OVERHEAD];
-  int clen = encryptMessageWithAad(
-      (const unsigned char *)message, strlen(message), g_dm.key,
-      (const unsigned char *)aad, (size_t)aadLen, ciphertext,
-      sizeof(ciphertext));
+  int clen =
+      encryptMessageWithAad((const unsigned char *)message, strlen(message),
+                            g_dm.key, (const unsigned char *)aad,
+                            (size_t)aadLen, ciphertext, sizeof(ciphertext));
   if (clen <= 0) {
     printMessage(COLOR_RED, "[!] ", "Failed to encrypt DM\n");
     return false;
@@ -506,7 +500,7 @@ static bool encryptAndSendDm(const char *message) {
     return false;
   }
 
-  char frame[MSG_SIZE * 2 + TOKEN_STR_SIZE + 32];
+  char frame[MSG_SIZE * 2 + TOKEN_STR_SIZE + 96];
   snprintf(frame, sizeof(frame), "DM_SEND|%s|%s|%" PRIu64 "|%s\n",
            g_dm.peerToken, g_dm.sessionId, sequence, encoded);
   if (!sendRawFrame(frame))
@@ -569,19 +563,20 @@ static void showRoomMessage(const char *sender, const char *senderToken,
   } else {
     char aad[512];
     size_t aadLen = 0;
-    if (!protocolBuildRoomAad(g_room.currentName, sender, senderToken, sessionId,
-                              sequence, aad, sizeof(aad), &aadLen))
+    if (!protocolBuildRoomAad(g_room.currentName, sender, senderToken,
+                              sessionId, sequence, aad, sizeof(aad), &aadLen))
       return;
     unsigned char decoded[MSG_SIZE];
     int dlen = decodeBase64(payload, decoded, sizeof(decoded));
     if (dlen <= 0) {
-      printMessage(COLOR_RED, "[!] ", "Failed to decode encrypted room message\n");
+      printMessage(COLOR_RED, "[!] ",
+                   "Failed to decode encrypted room message\n");
       return;
     }
     unsigned char decrypted[MSG_SIZE];
-    int plen = decryptMessageWithAad(
-        decoded, (size_t)dlen, g_room.key, (const unsigned char *)aad, aadLen,
-        decrypted, sizeof(decrypted) - 1);
+    int plen = decryptMessageWithAad(decoded, (size_t)dlen, g_room.key,
+                                     (const unsigned char *)aad, aadLen,
+                                     decrypted, sizeof(decrypted) - 1);
     if (plen <= 0) {
       printMessage(COLOR_RED, "[!] ", "Failed to decrypt room message\n");
       return;
@@ -639,8 +634,8 @@ static void showDmMessage(const char *senderToken, const char *sessionId,
   }
 
   char aad[256];
-  int aadLen = snprintf(aad, sizeof(aad), "DM_MSG|%s|%s|%s|%" PRIu64,
-                        sessionId, senderToken, g_identity.token, sequence);
+  int aadLen = snprintf(aad, sizeof(aad), "DM_MSG|%s|%s|%s|%" PRIu64, sessionId,
+                        senderToken, g_identity.token, sequence);
   if (aadLen <= 0 || (size_t)aadLen >= sizeof(aad))
     return;
 
@@ -652,9 +647,9 @@ static void showDmMessage(const char *senderToken, const char *sessionId,
   }
 
   unsigned char decrypted[MSG_SIZE];
-  int plen = decryptMessageWithAad(
-      decoded, (size_t)dlen, g_dm.key, (const unsigned char *)aad,
-      (size_t)aadLen, decrypted, sizeof(decrypted) - 1);
+  int plen = decryptMessageWithAad(decoded, (size_t)dlen, g_dm.key,
+                                   (const unsigned char *)aad, (size_t)aadLen,
+                                   decrypted, sizeof(decrypted) - 1);
   if (plen <= 0) {
     printMessage(COLOR_RED, "[!] ", "Failed to decrypt DM\n");
     return;
@@ -684,8 +679,8 @@ static void finalizeRoomSecretEntry(void) {
     if (strlen(g_input.roomSecret) < ROOM_SECRET_MIN_LEN) {
       printMessage(COLOR_RED, "[!] ",
                    "Room secret must contain at least 12 characters\n");
-    } else if (!createRoomSecrets(g_room.pendingName, g_input.roomSecret, saltHex,
-                           verifierHex, roomKey)) {
+    } else if (!createRoomSecrets(g_room.pendingName, g_input.roomSecret,
+                                  saltHex, verifierHex, roomKey)) {
       printMessage(COLOR_RED, "[!] ", "Failed to derive room secret\n");
     } else {
       char frame[MSG_SIZE];
@@ -698,8 +693,8 @@ static void finalizeRoomSecretEntry(void) {
   }
 
   char verifier[SHA256_HEX_SIZE];
-  if (!verifyRoomSecret(g_room.pendingName, g_input.roomSecret, g_room.pendingSalt,
-                        verifier, g_room.pendingKey)) {
+  if (!verifyRoomSecret(g_room.pendingName, g_input.roomSecret,
+                        g_room.pendingSalt, verifier, g_room.pendingKey)) {
     printMessage(COLOR_RED, "[!] ", "Failed to derive room secret\n");
     goto cleanup;
   }
@@ -722,15 +717,15 @@ static void handleDmInit(const char *senderToken, const char *sessionId,
                          const char *peerPubHex, const char *sigHex) {
   if (!protocolIsHex(senderToken, TOKEN_HEX_LEN) ||
       !protocolIsHex(sessionId, DM_SESSION_ID_HEX_LEN) ||
-      !protocolIsHex(peerPubHex, 64) ||
-      !protocolIsHex(sigHex, SIG_HEX_LEN)) {
+      !protocolIsHex(peerPubHex, 64) || !protocolIsHex(sigHex, SIG_HEX_LEN)) {
     printMessage(COLOR_RED, "[!] ", "Malformed DM_INIT frame\n");
     return;
   }
 
   unsigned char sig[SIG_BYTES];
   unsigned char peerPub[32];
-  if (!hexToBytes(sigHex, sig, sizeof(sig)) || !hexToBytes(peerPubHex, peerPub, sizeof(peerPub))) {
+  if (!hexToBytes(sigHex, sig, sizeof(sig)) ||
+      !hexToBytes(peerPubHex, peerPub, sizeof(peerPub))) {
     printMessage(COLOR_RED, "[!] ", "Invalid DM_INIT encoding\n");
     return;
   }
@@ -1124,8 +1119,8 @@ static void handleDmCommand(const char *input) {
   bytesToHex(sessionBytes, sizeof(sessionBytes), sessionId);
 
   unsigned char sig[SIG_BYTES];
-  if (!signDmFrame("DM_INIT", g_identity.token, token, sessionId, myPubHex,
-                   "-", sig)) {
+  if (!signDmFrame("DM_INIT", g_identity.token, token, sessionId, myPubHex, "-",
+                   sig)) {
     printMessage(COLOR_RED, "[!] ", "Failed to sign DM request\n");
     memset(myPriv, 0, sizeof(myPriv));
     return;
@@ -1164,29 +1159,29 @@ static bool processInput(char *message) {
     return false;
   }
   if (strcmp(message, "/help") == 0) {
-    print(
-        "/name <name>\n"
-        "/rooms\n"
-        "/members\n"
-        "/topic [text|-]\n"
-        "/create <room>\n"
-        "/create <room> -p [secret]\n"
-        "/enter <room>\n"
-        "/leave\n"
-        "/dm <contact>\n"
-        "/dmleave\n"
-        "/list\n"
-        "/search <query>\n"
-        "/nick [@|contact] <name>\n"
-        "/nick <contact> -\n"
-        "/token\n"
-        "/clear\n"
-        "/exit\n");
+    print("/name <name>\n"
+          "/rooms\n"
+          "/members\n"
+          "/topic [text|-]\n"
+          "/create <room>\n"
+          "/create <room> -p [secret]\n"
+          "/enter <room>\n"
+          "/leave\n"
+          "/dm <contact>\n"
+          "/dmleave\n"
+          "/list\n"
+          "/search <query>\n"
+          "/nick [@|contact] <name>\n"
+          "/nick <contact> -\n"
+          "/token\n"
+          "/clear\n"
+          "/exit\n");
     return true;
   }
   if (strncmp(message, "/name ", 6) == 0) {
     char name[MAX_NAME_LEN];
-    if (sscanf(message + 6, "%63s", name) != 1 || !protocolIsSafeIdentifier(name)) {
+    if (sscanf(message + 6, "%63s", name) != 1 ||
+        !protocolIsSafeIdentifier(name)) {
       printMessage(COLOR_RED, "[!] ", "Invalid name\n");
       return true;
     }
@@ -1224,20 +1219,18 @@ static bool processInput(char *message) {
       return true;
     }
 
-    char frame[MSG_SIZE];
+    char frame[MSG_SIZE + 32];
     snprintf(frame, sizeof(frame), "ROOM_TOPIC_SET|%s\n", encoded);
     sendRawFrame(frame);
     return true;
   }
-  if (strcmp(message, "/create") == 0 ||
-      strncmp(message, "/create ", 8) == 0) {
+  if (strcmp(message, "/create") == 0 || strncmp(message, "/create ", 8) == 0) {
     char room[MAX_NAME_LEN];
     const char *inlineSecret = NULL;
     ProtocolRoomCreateMode mode = protocolParseRoomCreateArgs(
         message + 7, room, sizeof(room), &inlineSecret);
     if (mode == PROTOCOL_ROOM_CREATE_INVALID) {
-      printMessage(COLOR_RED, "[!] ",
-                   "Usage: /create <room> [-p [secret]]\n");
+      printMessage(COLOR_RED, "[!] ", "Usage: /create <room> [-p [secret]]\n");
       return true;
     }
     if (mode != PROTOCOL_ROOM_CREATE_OPEN) {
@@ -1358,10 +1351,10 @@ static bool processInput(char *message) {
       return true;
     }
 
-    if (rest && rest[0] &&
-        (isNumericReference(first) || isTokenHex(first))) {
+    if (rest && rest[0] && (isNumericReference(first) || isTokenHex(first))) {
       char probeToken[TOKEN_STR_SIZE];
-      if (resolveDmReference(first, probeToken, sizeof(probeToken), true, false)) {
+      if (resolveDmReference(first, probeToken, sizeof(probeToken), true,
+                             false)) {
         char nick[MAX_NAME_LEN];
         copyTrimmed(rest, nick, sizeof(nick));
         if (!nick[0]) {
@@ -1467,7 +1460,8 @@ static void inputLoop(void) {
         g_input.roomSecret[--g_input.roomSecretLen] = '\0';
         printf("\b \b");
         fflush(stdout);
-      } else if (isprint((unsigned char)c) && g_input.roomSecretLen < MSG_SIZE - 1) {
+      } else if (isprint((unsigned char)c) &&
+                 g_input.roomSecretLen < MSG_SIZE - 1) {
         g_input.roomSecret[g_input.roomSecretLen++] = c;
         g_input.roomSecret[g_input.roomSecretLen] = '\0';
         printf("*");
@@ -1569,7 +1563,8 @@ static bool authenticate(void) {
     return false;
 
   char *parts[PROTOCOL_MAX_PARTS] = {0};
-  size_t partCount = protocolSplitFields(challengeBuf, parts, PROTOCOL_MAX_PARTS);
+  size_t partCount =
+      protocolSplitFields(challengeBuf, parts, PROTOCOL_MAX_PARTS);
   if (partCount != 4 || strcmp(parts[0], "CHALLENGE") != 0 ||
       strcmp(parts[1], PROTOCOL_VERSION) != 0 ||
       strlen(parts[2]) != CHALLENGE_HEX_LEN ||

@@ -160,8 +160,7 @@ static bool tokenMapLookupByFD(SocketHandle fd, char out[TOKEN_HEX_LEN + 1]) {
 static void setSocketTimeoutsMs(SocketHandle socketFD, int receiveTimeoutMs,
                                 int sendTimeoutMs) {
 #ifdef _WIN32
-  DWORD receiveTimeout =
-      receiveTimeoutMs > 0 ? (DWORD)receiveTimeoutMs : 0;
+  DWORD receiveTimeout = receiveTimeoutMs > 0 ? (DWORD)receiveTimeoutMs : 0;
   DWORD sendTimeout = sendTimeoutMs > 0 ? (DWORD)sendTimeoutMs : 0;
   setsockopt(socketFD, SOL_SOCKET, SO_RCVTIMEO, (const char *)&receiveTimeout,
              sizeof(receiveTimeout));
@@ -311,9 +310,8 @@ static void removeRoomMemberLocked(Room *room, SocketHandle socketFD) {
     return;
 
   char departingToken[TOKEN_STR_SIZE] = {0};
-  bool departingOwner =
-      tokenMapLookupByFD(socketFD, departingToken) &&
-      strcmp(departingToken, room->ownerToken) == 0;
+  bool departingOwner = tokenMapLookupByFD(socketFD, departingToken) &&
+                        strcmp(departingToken, room->ownerToken) == 0;
   if (!removeMemberFromRoom(room, socketFD) || !departingOwner)
     return;
 
@@ -417,10 +415,10 @@ static void handleSetName(Client *client, const char *name) {
   snprintf(oldName, sizeof(oldName), "%s", client->name);
   snprintf(client->name, sizeof(client->name), "%s", name);
   client->hasConfirmedName = true;
-  Room *room = client->currentRoom >= 0 &&
-                       client->currentRoom < g_context->roomCount
-                   ? g_context->rooms[client->currentRoom]
-                   : NULL;
+  Room *room =
+      client->currentRoom >= 0 && client->currentRoom < g_context->roomCount
+          ? g_context->rooms[client->currentRoom]
+          : NULL;
   pthread_mutex_unlock(&g_context->mutex);
   char nameAck[MSG_SIZE];
   snprintf(nameAck, sizeof(nameAck), "OK|NAME_SET|%s\n", client->name);
@@ -592,7 +590,7 @@ static void sendRoomTopic(Client *client) {
   if (!topic[0])
     snprintf(encoded, sizeof(encoded), "-");
 
-  char frame[MSG_SIZE];
+  char frame[MSG_SIZE + 32];
   snprintf(frame, sizeof(frame), "INFO|ROOM_TOPIC|%s|-\n", encoded);
   sendFrame(client->socketFD, frame);
 }
@@ -674,8 +672,8 @@ static void handleRoomEnter(Client *client, const char *roomName) {
   pthread_mutex_unlock(&g_context->mutex);
 
   char challenge[MSG_SIZE];
-  snprintf(challenge, sizeof(challenge), "ROOM_CHALLENGE|%s|%s|%s\n",
-           roomName, kdfId, saltHex);
+  snprintf(challenge, sizeof(challenge), "ROOM_CHALLENGE|%s|%s|%s\n", roomName,
+           kdfId, saltHex);
   sendFrame(client->socketFD, challenge);
 }
 
@@ -734,10 +732,10 @@ static void handleRoomProof(Client *client, const char *roomName,
 
 static void handleRoomLeave(Client *client) {
   pthread_mutex_lock(&g_context->mutex);
-  Room *oldRoom = client->currentRoom >= 0 &&
-                          client->currentRoom < g_context->roomCount
-                      ? g_context->rooms[client->currentRoom]
-                      : NULL;
+  Room *oldRoom =
+      client->currentRoom >= 0 && client->currentRoom < g_context->roomCount
+          ? g_context->rooms[client->currentRoom]
+          : NULL;
   pthread_mutex_unlock(&g_context->mutex);
   if (!oldRoom) {
     sendError(client->socketFD, "Not in a room");
@@ -778,10 +776,10 @@ static void handleRoomSend(Client *client, const char *sessionId,
   }
 
   pthread_mutex_lock(&g_context->mutex);
-  Room *room = client->currentRoom >= 0 &&
-                       client->currentRoom < g_context->roomCount
-                   ? g_context->rooms[client->currentRoom]
-                   : NULL;
+  Room *room =
+      client->currentRoom >= 0 && client->currentRoom < g_context->roomCount
+          ? g_context->rooms[client->currentRoom]
+          : NULL;
   bool isMember = false;
   if (room) {
     for (int i = 0; i < room->memberCount; i++) {
@@ -808,9 +806,8 @@ static void handleRoomSend(Client *client, const char *sessionId,
   }
 
   if ((!protectedRoom && decodedLen > MAX_MESSAGE_TEXT) ||
-      (protectedRoom &&
-       (decodedLen < AES_GCM_OVERHEAD ||
-        decodedLen > MAX_MESSAGE_TEXT + AES_GCM_OVERHEAD))) {
+      (protectedRoom && (decodedLen < AES_GCM_OVERHEAD ||
+                         decodedLen > MAX_MESSAGE_TEXT + AES_GCM_OVERHEAD))) {
     sendError(client->socketFD, "Invalid encrypted room message");
     return;
   }
@@ -1124,10 +1121,10 @@ static void *handleClient(void *arg) {
 
 disconnect:
   pthread_mutex_lock(&g_context->mutex);
-  Room *room = client->currentRoom >= 0 &&
-                       client->currentRoom < g_context->roomCount
-                   ? g_context->rooms[client->currentRoom]
-                   : NULL;
+  Room *room =
+      client->currentRoom >= 0 && client->currentRoom < g_context->roomCount
+          ? g_context->rooms[client->currentRoom]
+          : NULL;
   pthread_mutex_unlock(&g_context->mutex);
   if (room) {
     char left[MSG_SIZE];

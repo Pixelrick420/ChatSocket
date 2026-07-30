@@ -54,7 +54,7 @@ bool historyAppend(const char *peerToken, bool sent, const char *message) {
   if (!ensureDir())
     return false;
 
-  char path[512];
+  char path[512 + 96];
   if (!historyPath(peerToken, path, sizeof(path)))
     return false;
 
@@ -73,8 +73,7 @@ bool historyAppend(const char *peerToken, bool sent, const char *message) {
     return false;
   }
   FILE *f = fdopen(fd, "a");
-  if (!f)
-  {
+  if (!f) {
     platformCloseFd(fd);
     return false;
   }
@@ -160,8 +159,7 @@ size_t historyLoadEntries(HistoryDmEntry *entries, size_t maxEntries) {
     char fullPath[1024 + NAME_MAX + 2];
     snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, entry->d_name);
     struct stat st;
-    allEntries[count].lastActive =
-        (stat(fullPath, &st) == 0) ? st.st_mtime : 0;
+    allEntries[count].lastActive = (stat(fullPath, &st) == 0) ? st.st_mtime : 0;
     count++;
   }
   closedir(d);

@@ -15,7 +15,7 @@
 
 #include "platform.h"
 
-#define MSG_SIZE         4096
+#define MSG_SIZE         8192
 #define MAX_MESSAGE_TEXT 1400
 #define PORT             2077
 #define MAX_NAME_LEN       64

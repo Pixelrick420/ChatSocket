@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #define IDENTITY_KEY_BYTES   32
 #define TOKEN_HEX_LEN        64
@@ -25,6 +26,15 @@
 #define CHALLENGE_HEX_SIZE   65
 #define MAX_NAME_LEN         64
 #define MAX_DM_NICKS         50
+/* Maximum length of a config-directory path as returned by
+ * platformGetConfigDir(). */
+#define CONFIG_DIR_MAX 1024
+
+/* Buffer size for a full file path (config dir + separator + filename).
+ * Sized with headroom above CONFIG_DIR_MAX so the compiler can prove
+ * snprintf() can never truncate the longest suffix we append here
+ * ("identity.key" / "dm_nicks.tsv", 12 chars). */
+#define IDENTITY_PATH_MAX (CONFIG_DIR_MAX + 32)
 
 typedef struct {
     unsigned char priv[IDENTITY_KEY_BYTES];
