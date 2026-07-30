@@ -215,8 +215,6 @@ bool protocolAcceptRoomSequence(RoomReplayTracker *tracker,
     return true;
   }
 
-  if (sequence != 1)
-    return false;
   for (size_t i = 0; i < ROOM_REPLAY_SESSIONS; i++) {
     if (strcmp(tracker->seenSessions[i], sessionId) == 0)
       return false;

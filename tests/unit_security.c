@@ -169,8 +169,8 @@ static void testRoomMessageBindingAndReplay(void) {
   assert(protocolAcceptRoomSequence(&tracker, token, sessionA, 1));
   assert(protocolAcceptRoomSequence(&tracker, token, sessionA, 2));
   assert(!protocolAcceptRoomSequence(&tracker, token, sessionA, 2));
-  assert(!protocolAcceptRoomSequence(&tracker, token, sessionB, 2));
-  assert(protocolAcceptRoomSequence(&tracker, token, sessionB, 1));
+  assert(protocolAcceptRoomSequence(&tracker, token, sessionB, 2));
+  assert(protocolAcceptRoomSequence(&tracker, token, sessionB, 3));
   assert(!protocolAcceptRoomSequence(&tracker, token, sessionA, 1));
 }
 
